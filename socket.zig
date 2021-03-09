@@ -124,6 +124,14 @@ pub const Socket = struct {
             .address = net.Address.initPosix(@alignCast(4, &address)),
         };
     }
+
+    pub fn read(self: Socket, buf: []u8) !usize {
+        return try os.read(self.fd, buf);
+    }
+
+    pub fn write(self: Socket, buf: []const u8) !usize {
+        return try os.write(self.fd, buf);
+    }
 };
 
 test "socket/linux: set write timeout" {
@@ -156,7 +164,7 @@ test "socket/linux: set write timeout" {
     try b.setWriteBufferSize(1024);
     try b.setWriteTimeout(10);
 
-    testing.expectEqual(buf.len - 1, try os.write(b.fd, &buf));
+    testing.expectEqual(buf.len - 1, try b.write(&buf));
 }
 
 test "socket/linux: set read timeout" {
@@ -179,7 +187,7 @@ test "socket/linux: set read timeout" {
     defer ab.socket.deinit();
 
     var buf: [1]u8 = undefined;
-    testing.expectError(error.WouldBlock, os.read(b.fd, &buf));
+    testing.expectError(error.WouldBlock, b.read(&buf));
 }
 
 test "socket/linux: create socket pair" {
