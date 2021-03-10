@@ -35,7 +35,7 @@ pub const Reactor = struct {
         });
     }
 
-    pub fn poll(self: Reactor, comptime max_num_events: comptime_int, comptime callback: fn (Event) void, timeout_milliseconds: ?usize) !void {
+    pub fn poll(self: Reactor, comptime max_num_events: comptime_int, closure: anytype, timeout_milliseconds: ?usize) !void {
         var events: [max_num_events]os.epoll_event = undefined;
 
         const num_events = os.epoll_wait(self.fd, &events, if (timeout_milliseconds) |ms| @intCast(i32, ms) else -1);
@@ -45,7 +45,7 @@ pub const Reactor = struct {
             const is_readable = ev.events & os.EPOLLIN != 0;
             const is_writable = ev.events & os.EPOLLOUT != 0;
 
-            callback(Event{
+            closure.call(Event{
                 .data = ev.data.ptr,
                 .is_error = is_error,
                 .is_hup = is_hup,
@@ -65,7 +65,7 @@ test "reactor: async socket" {
 
     try reactor.add(a.fd, 0, os.EPOLLIN | os.EPOLLOUT | os.EPOLLET | os.EPOLLRDHUP);
     try reactor.poll(1, struct {
-        fn handle(event: Event) void {
+        fn call(event: Event) void {
             testing.expectEqual(
                 Event{
                     .data = 0,
@@ -77,7 +77,7 @@ test "reactor: async socket" {
                 event,
             );
         }
-    }.handle, null);
+    }, null);
 
     try a.bind(net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 0));
     try a.listen(128);
@@ -90,7 +90,7 @@ test "reactor: async socket" {
 
     try reactor.add(b.fd, 1, os.EPOLLIN | os.EPOLLOUT | os.EPOLLET | os.EPOLLRDHUP);
     try reactor.poll(1, struct {
-        fn handle(event: Event) void {
+        fn call(event: Event) void {
             testing.expectEqual(
                 Event{
                     .data = 1,
@@ -102,7 +102,7 @@ test "reactor: async socket" {
                 event,
             );
         }
-    }.handle, null);
+    }, null);
 
     b.connect(binded_address) catch |err| switch (err) {
         error.WouldBlock => {},
@@ -110,7 +110,7 @@ test "reactor: async socket" {
     };
 
     try reactor.poll(1, struct {
-        fn handle(event: Event) void {
+        fn call(event: Event) void {
             testing.expectEqual(
                 Event{
                     .data = 1,
@@ -122,10 +122,10 @@ test "reactor: async socket" {
                 event,
             );
         }
-    }.handle, null);
+    }, null);
 
     try reactor.poll(1, struct {
-        fn handle(event: Event) void {
+        fn call(event: Event) void {
             testing.expectEqual(
                 Event{
                     .data = 0,
@@ -137,5 +137,5 @@ test "reactor: async socket" {
                 event,
             );
         }
-    }.handle, null);
+    }, null);
 }
