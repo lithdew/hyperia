@@ -63,7 +63,7 @@ test "reactor: async socket" {
     const a = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer a.deinit();
 
-    try reactor.add(a.fd, 0, os.EPOLLIN | os.EPOLLOUT | os.EPOLLET | os.EPOLLRDHUP);
+    try reactor.add(a.fd, 0, os.EPOLLIN | os.EPOLLET | os.EPOLLRDHUP);
     try reactor.poll(1, struct {
         fn call(event: Event) void {
             testing.expectEqual(
@@ -72,7 +72,7 @@ test "reactor: async socket" {
                     .is_error = false,
                     .is_hup = true,
                     .is_readable = false,
-                    .is_writable = true,
+                    .is_writable = false,
                 },
                 event,
             );
