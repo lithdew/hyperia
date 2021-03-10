@@ -130,13 +130,11 @@ test "sink: push and pop 600,000 u64s with 15 producers" {
         fn runConsumer(self: @This()) !void {
             var i: usize = 0;
             while (i < NUM_ITEMS) : (i += 1) {
-                const node = while (true) {
+                self.allocator.destroy(while (true) {
                     if (self.sink.tryPop()) |node| {
                         break node;
                     }
-                } else unreachable;
-
-                self.allocator.destroy(node);
+                } else unreachable);
             }
         }
     };
@@ -145,16 +143,91 @@ test "sink: push and pop 600,000 u64s with 15 producers" {
 
     var sink: TestSink = .{};
 
-    var consumer = try std.Thread.spawn(Context{ .allocator = allocator, .sink = &sink }, Context.runConsumer);
+    const consumer = try std.Thread.spawn(Context{
+        .allocator = allocator,
+        .sink = &sink,
+    }, Context.runConsumer);
+    defer consumer.wait();
 
     var producers: [NUM_PRODUCERS]*std.Thread = undefined;
+    defer for (producers) |producer| producer.wait();
+
     for (producers) |*producer| {
-        producer.* = try std.Thread.spawn(Context{ .allocator = allocator, .sink = &sink }, Context.runProducer);
+        producer.* = try std.Thread.spawn(Context{
+            .allocator = allocator,
+            .sink = &sink,
+        }, Context.runProducer);
     }
+}
 
-    for (producers) |producer| {
-        producer.wait();
+test "sink: batch push and pop 600,000 u64s with 15 producers" {
+    const NUM_ITEMS = 600_000;
+    const NUM_ITEMS_PER_BATCH = 100;
+    const NUM_PRODUCERS = 15;
+
+    const TestSink = Sink(u64);
+
+    const Context = struct {
+        allocator: *mem.Allocator,
+        sink: *TestSink,
+
+        fn runBatchProducer(self: @This()) !void {
+            var i: usize = 0;
+            while (i < NUM_ITEMS / NUM_PRODUCERS) : (i += NUM_ITEMS_PER_BATCH) {
+                var first = try self.allocator.create(TestSink.Node);
+                first.* = .{ .value = @intCast(u64, i) };
+
+                const last = first;
+
+                var j: usize = 0;
+                while (j < NUM_ITEMS_PER_BATCH - 1) : (j += 1) {
+                    const node = try self.allocator.create(TestSink.Node);
+                    node.* = .{
+                        .next = first,
+                        .value = @intCast(u64, i) + 1 + @intCast(u64, j),
+                    };
+                    first = node;
+                }
+
+                self.sink.tryPushBatch(first, last);
+            }
+        }
+
+        fn runBatchConsumer(self: @This()) !void {
+            var first: *TestSink.Node = undefined;
+            var last: *TestSink.Node = undefined;
+
+            var i: usize = 0;
+            while (i < NUM_ITEMS) {
+                var j = self.sink.tryPopBatch(&first, &last);
+                i += j;
+
+                while (j > 0) : (j -= 1) {
+                    const next = first.next;
+                    self.allocator.destroy(first);
+                    first = next orelse continue;
+                }
+            }
+        }
+    };
+
+    const allocator = testing.allocator;
+
+    var sink: TestSink = .{};
+
+    const consumer = try std.Thread.spawn(Context{
+        .allocator = allocator,
+        .sink = &sink,
+    }, Context.runBatchConsumer);
+    defer consumer.wait();
+
+    var producers: [NUM_PRODUCERS]*std.Thread = undefined;
+    defer for (producers) |producer| producer.wait();
+
+    for (producers) |*producer| {
+        producer.* = try std.Thread.spawn(Context{
+            .allocator = allocator,
+            .sink = &sink,
+        }, Context.runBatchProducer);
     }
-
-    consumer.wait();
 }
