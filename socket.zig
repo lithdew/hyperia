@@ -46,6 +46,38 @@ pub const Socket = struct {
         try os.getsockoptError(self.fd);
     }
 
+    pub fn getReadBufferSize(self: Socket) !u32 {
+        var value: u32 = undefined;
+        var value_len: u32 = @sizeOf(u32);
+
+        const rc = os.system.getsockopt(self.fd, os.SOL_SOCKET, os.SO_RCVBUF, mem.asBytes(&value), &value_len);
+        return switch (os.errno(rc)) {
+            0 => value,
+            os.EBADF => error.BadFileDescriptor,
+            os.EFAULT => error.InvalidAddressSpace,
+            os.EINVAL => error.InvalidSocketOption,
+            os.ENOPROTOOPT => error.UnknownSocketOption,
+            os.ENOTSOCK => error.NotASocket,
+            else => |err| os.unexpectedErrno(err),
+        };
+    }
+
+    pub fn getWriteBufferSize(self: Socket) !u32 {
+        var value: u32 = undefined;
+        var value_len: u32 = @sizeOf(u32);
+
+        const rc = os.system.getsockopt(self.fd, os.SOL_SOCKET, os.SO_SNDBUF, mem.asBytes(&value), &value_len);
+        return switch (os.errno(rc)) {
+            0 => value,
+            os.EBADF => error.BadFileDescriptor,
+            os.EFAULT => error.InvalidAddressSpace,
+            os.EINVAL => error.InvalidSocketOption,
+            os.ENOPROTOOPT => error.UnknownSocketOption,
+            os.ENOTSOCK => error.NotASocket,
+            else => |err| os.unexpectedErrno(err),
+        };
+    }
+
     pub fn setReadBufferSize(self: Socket, size: u32) !void {
         const rc = os.system.setsockopt(self.fd, os.SOL_SOCKET, os.SO_RCVBUF, mem.asBytes(&size), @sizeOf(u32));
         return switch (os.errno(rc)) {
