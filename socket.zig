@@ -166,6 +166,10 @@ pub const Socket = struct {
     }
 };
 
+test {
+    testing.refAllDecls(Socket);
+}
+
 test "socket/linux: set write timeout" {
     const a = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer a.deinit();

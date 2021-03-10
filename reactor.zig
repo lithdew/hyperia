@@ -16,6 +16,20 @@ pub const Event = struct {
     is_writable: bool,
 };
 
+pub const Flags = struct {
+    oneshot: bool = false,
+    readable: bool = false,
+    writable: bool = false,
+
+    pub fn raw(self: Flags) u32 {
+        var flags: u32 = os.EPOLLRDHUP;
+        flags |= if (self.oneshot) os.EPOLLONESHOT else os.EPOLLET;
+        if (self.readable) flags |= os.EPOLLIN;
+        if (self.writable) flags |= os.EPOLLOUT;
+        return flags;
+    }
+};
+
 pub const Reactor = struct {
     fd: os.fd_t,
 
@@ -28,9 +42,9 @@ pub const Reactor = struct {
         os.close(self.fd);
     }
 
-    pub fn add(self: Reactor, fd: os.fd_t, data: anytype, events: u32) !void {
+    pub fn add(self: Reactor, fd: os.fd_t, data: anytype, flags: Flags) !void {
         try os.epoll_ctl(self.fd, os.EPOLL_CTL_ADD, fd, &os.epoll_event{
-            .events = events,
+            .events = flags.raw(),
             .data = .{ .ptr = if (@typeInfo(@TypeOf(data)) == .Pointer) @ptrToInt(data) else data },
         });
     }
@@ -56,6 +70,10 @@ pub const Reactor = struct {
     }
 };
 
+test {
+    testing.refAllDecls(Reactor);
+}
+
 test "reactor: async socket" {
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
@@ -63,7 +81,7 @@ test "reactor: async socket" {
     const a = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer a.deinit();
 
-    try reactor.add(a.fd, 0, os.EPOLLIN | os.EPOLLET | os.EPOLLRDHUP);
+    try reactor.add(a.fd, 0, .{ .readable = true });
     try reactor.poll(1, struct {
         fn call(event: Event) void {
             testing.expectEqual(
@@ -88,7 +106,7 @@ test "reactor: async socket" {
     const b = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer b.deinit();
 
-    try reactor.add(b.fd, 1, os.EPOLLIN | os.EPOLLOUT | os.EPOLLET | os.EPOLLRDHUP);
+    try reactor.add(b.fd, 1, .{ .readable = true, .writable = true });
     try reactor.poll(1, struct {
         fn call(event: Event) void {
             testing.expectEqual(

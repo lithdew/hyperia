@@ -64,6 +64,10 @@ pub fn ObjectPool(comptime T: type, comptime capacity: comptime_int) type {
     };
 }
 
+test {
+    testing.refAllDecls(ObjectPool(u8, 16));
+}
+
 test "object_pool: test invariants" {
     const allocator = testing.allocator;
 
