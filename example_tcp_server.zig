@@ -37,26 +37,22 @@ pub fn main() !void {
     log.info("listening for connections on: {}", .{try listener.getName()});
 
     var frame = async loop(reactor, &listener);
+    defer nosuspend await frame catch {};
 
     while (true) {
-        var batch: zap.Pool.Batch = .{};
-        defer hyperia.pool.schedule(.{}, batch);
+        const EventProcessor = struct {
+            batch: zap.Pool.Batch = .{},
 
-        try reactor.poll(
-            128,
-            struct {
-                batch: *zap.Pool.Batch,
+            pub fn call(self: *@This(), event: Reactor.Event) void {
+                log.info("got event: {}", .{event});
+                const handle = @intToPtr(*Reactor.Handle, event.data);
+                handle.call(&self.batch, event);
+            }
+        };
 
-                pub fn call(self: @This(), event: Reactor.Event) void {
-                    log.info("got event: {}", .{event});
+        var processor: EventProcessor = .{};
+        defer hyperia.pool.schedule(.{}, processor.batch);
 
-                    const handle = @intToPtr(*Reactor.Handle, event.data);
-                    handle.call(self.batch, event);
-                }
-            }{ .batch = &batch },
-            null,
-        );
+        try reactor.poll(128, &processor, null);
     }
-
-    try nosuspend await frame;
 }
