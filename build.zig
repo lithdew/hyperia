@@ -36,4 +36,25 @@ pub fn build(b: *Builder) void {
     }
 
     test_step.dependOn(&file.step);
+
+    inline for (.{
+        "example_tcp_server",
+    }) |example_name| {
+        const example_step = b.step(example_name, "Example " ++ example_name ++ ".zig");
+
+        const exe = b.addExecutable(example_name, example_name ++ ".zig");
+        exe.setTarget(target);
+        exe.setBuildMode(mode);
+        exe.addPackage(pkgs.zap);
+        exe.addPackage(pkgs.hyperia);
+        exe.linkLibC();
+        exe.install();
+
+        const exe_run = exe.run();
+        if (b.args != null) {
+            exe_run.addArgs(b.args.?);
+        }
+
+        example_step.dependOn(&exe_run.step);
+    }
 }

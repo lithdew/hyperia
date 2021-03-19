@@ -1,6 +1,6 @@
 const std = @import("std");
 const zap = @import("zap");
-const hyperia = @import("hyperia");
+const hyperia = @import("hyperia.zig");
 
 const testing = std.testing;
 

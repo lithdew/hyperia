@@ -1,6 +1,6 @@
 const std = @import("std");
 const zap = @import("zap");
-const hyperia = @import("hyperia");
+const hyperia = @import("hyperia.zig");
 const Socket = @import("socket.zig").Socket;
 const Reactor = @import("reactor.zig").Reactor;
 const AsyncParker = @import("async_parker.zig").AsyncParker;
@@ -35,6 +35,10 @@ pub const AsyncSocket = struct {
 
     pub fn listen(self: *Self, max_backlog_size: usize) !void {
         return self.socket.listen(max_backlog_size);
+    }
+
+    pub fn setReuseAddress(self: *Self, enabled: bool) !void {
+        return self.socket.setReuseAddress(enabled);
     }
 
     pub fn getName(self: *Self) !net.Address {

@@ -31,6 +31,10 @@ pub const Socket = struct {
         try os.listen(self.fd, @truncate(u31, max_backlog_size));
     }
 
+    pub fn setReuseAddress(self: Socket, enabled: bool) !void {
+        try os.setsockopt(self.fd, os.SOL_SOCKET, os.SO_REUSEADDR, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+    }
+
     pub fn getName(self: Socket) !net.Address {
         var binded_address: os.sockaddr = undefined;
         var binded_address_len: u32 = @sizeOf(os.sockaddr);
