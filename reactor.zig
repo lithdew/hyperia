@@ -8,29 +8,29 @@ const testing = std.testing;
 
 const print = std.debug.print;
 
-pub const Event = struct {
-    data: usize,
-    is_error: bool,
-    is_hup: bool,
-    is_readable: bool,
-    is_writable: bool,
-};
-
-pub const Flags = struct {
-    oneshot: bool = false,
-    readable: bool = false,
-    writable: bool = false,
-
-    pub fn raw(self: Flags) u32 {
-        var flags: u32 = os.EPOLLRDHUP;
-        flags |= if (self.oneshot) os.EPOLLONESHOT else os.EPOLLET;
-        if (self.readable) flags |= os.EPOLLIN;
-        if (self.writable) flags |= os.EPOLLOUT;
-        return flags;
-    }
-};
-
 pub const Reactor = struct {
+    pub const Event = struct {
+        data: usize,
+        is_error: bool,
+        is_hup: bool,
+        is_readable: bool,
+        is_writable: bool,
+    };
+
+    pub const Interest = struct {
+        oneshot: bool = false,
+        readable: bool = false,
+        writable: bool = false,
+
+        pub fn flags(self: Interest) u32 {
+            var set: u32 = os.EPOLLRDHUP;
+            set |= if (self.oneshot) os.EPOLLONESHOT else os.EPOLLET;
+            if (self.readable) set |= os.EPOLLIN;
+            if (self.writable) set |= os.EPOLLOUT;
+            return set;
+        }
+    };
+
     fd: os.fd_t,
 
     pub fn init(flags: u32) !Reactor {
@@ -42,9 +42,9 @@ pub const Reactor = struct {
         os.close(self.fd);
     }
 
-    pub fn add(self: Reactor, fd: os.fd_t, data: anytype, flags: Flags) !void {
+    pub fn add(self: Reactor, fd: os.fd_t, data: anytype, interest: Interest) !void {
         try os.epoll_ctl(self.fd, os.EPOLL_CTL_ADD, fd, &os.epoll_event{
-            .events = flags.raw(),
+            .events = interest.flags(),
             .data = .{ .ptr = if (@typeInfo(@TypeOf(data)) == .Pointer) @ptrToInt(data) else data },
         });
     }
@@ -74,7 +74,7 @@ test {
     testing.refAllDecls(Reactor);
 }
 
-test "reactor: async socket" {
+test "reactor: shutdown before accept async socket" {
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
 
@@ -83,9 +83,9 @@ test "reactor: async socket" {
 
     try reactor.add(a.fd, 0, .{ .readable = true });
     try reactor.poll(1, struct {
-        fn call(event: Event) void {
+        fn call(event: Reactor.Event) void {
             testing.expectEqual(
-                Event{
+                Reactor.Event{
                     .data = 0,
                     .is_error = false,
                     .is_hup = true,
@@ -108,9 +108,9 @@ test "reactor: async socket" {
 
     try reactor.add(b.fd, 1, .{ .readable = true, .writable = true });
     try reactor.poll(1, struct {
-        fn call(event: Event) void {
+        fn call(event: Reactor.Event) void {
             testing.expectEqual(
-                Event{
+                Reactor.Event{
                     .data = 1,
                     .is_error = false,
                     .is_hup = true,
@@ -128,9 +128,9 @@ test "reactor: async socket" {
     };
 
     try reactor.poll(1, struct {
-        fn call(event: Event) void {
+        fn call(event: Reactor.Event) void {
             testing.expectEqual(
-                Event{
+                Reactor.Event{
                     .data = 1,
                     .is_error = false,
                     .is_hup = false,
@@ -143,9 +143,265 @@ test "reactor: async socket" {
     }, null);
 
     try reactor.poll(1, struct {
-        fn call(event: Event) void {
+        fn call(event: Reactor.Event) void {
             testing.expectEqual(
-                Event{
+                Reactor.Event{
+                    .data = 0,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = true,
+                    .is_writable = false,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    const ab = try a.accept(os.SOCK_CLOEXEC);
+    defer ab.socket.deinit();
+
+    try os.shutdown(ab.socket.fd, .both);
+
+    try reactor.add(ab.socket.fd, 2, .{ .readable = true, .writable = true });
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = true,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 2,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = true,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+}
+
+test "reactor: shutdown async socket" {
+    const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
+    defer reactor.deinit();
+
+    const a = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer a.deinit();
+
+    try reactor.add(a.fd, 0, .{ .readable = true });
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 0,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = false,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try a.bind(net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 0));
+    try a.listen(128);
+
+    const binded_address = try a.getName();
+    print("Binded to address: {}\n", .{binded_address});
+
+    const b = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer b.deinit();
+
+    try reactor.add(b.fd, 1, .{ .readable = true, .writable = true });
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    b.connect(binded_address) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 0,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = true,
+                    .is_writable = false,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    const ab = try a.accept(os.SOCK_CLOEXEC);
+    defer ab.socket.deinit();
+
+    try reactor.add(ab.socket.fd, 2, .{ .readable = true, .writable = true });
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 2,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try os.shutdown(b.fd, .both);
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 2,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = true,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = true,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+}
+
+test "reactor: async socket" {
+    const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
+    defer reactor.deinit();
+
+    const a = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer a.deinit();
+
+    try reactor.add(a.fd, 0, .{ .readable = true });
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 0,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = false,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try a.bind(net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 0));
+    try a.listen(128);
+
+    const binded_address = try a.getName();
+    print("Binded to address: {}\n", .{binded_address});
+
+    const b = try Socket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_NONBLOCK | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer b.deinit();
+
+    try reactor.add(b.fd, 1, .{ .readable = true, .writable = true });
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    b.connect(binded_address) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = 1,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }, null);
+
+    try reactor.poll(1, struct {
+        fn call(event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
                     .data = 0,
                     .is_error = false,
                     .is_hup = false,
