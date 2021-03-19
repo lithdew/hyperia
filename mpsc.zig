@@ -108,8 +108,8 @@ test {
     testing.refAllDecls(Sink(u64));
 }
 
-test "sink: push and pop 600,000 u64s with 15 producers" {
-    const NUM_ITEMS = 600_000;
+test "sink: push and pop 60,000 u64s with 15 producers" {
+    const NUM_ITEMS = 60_000;
     const NUM_PRODUCERS = 15;
 
     const TestSink = Sink(u64);
@@ -160,8 +160,8 @@ test "sink: push and pop 600,000 u64s with 15 producers" {
     }
 }
 
-test "sink: batch push and pop 600,000 u64s with 15 producers" {
-    const NUM_ITEMS = 600_000;
+test "sink: batch push and pop 60,000 u64s with 15 producers" {
+    const NUM_ITEMS = 60_000;
     const NUM_ITEMS_PER_BATCH = 100;
     const NUM_PRODUCERS = 15;
 

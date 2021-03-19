@@ -4,8 +4,19 @@ const zap = @import("zap");
 const mem = std.mem;
 const heap = std.heap;
 const builtin = std.builtin;
+const testing = std.testing;
 
 const assert = std.debug.assert;
+
+pub const mpsc = @import("mpsc.zig");
+pub const timer = @import("timer.zig");
+
+pub const ObjectPool = @import("object_pool.zig").ObjectPool;
+
+pub const Reactor = @import("reactor.zig").Reactor;
+pub const Socket = @import("socket.zig").Socket;
+pub const AsyncParker = @import("async_parker.zig").AsyncParker;
+pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
 
 pub var gpa: heap.GeneralPurposeAllocator(.{}) = undefined;
 pub var allocator: mem.Allocator = undefined;
@@ -23,5 +34,9 @@ pub fn init() void {
 
 pub fn deinit() void {
     pool.deinit();
-    assert(gpa.deinit());
+    assert(!gpa.deinit());
+}
+
+test {
+    testing.refAllDecls(@This());
 }

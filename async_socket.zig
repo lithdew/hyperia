@@ -16,6 +16,14 @@ pub const AsyncSocket = struct {
     readable: AsyncParker = .{},
     writable: AsyncParker = .{},
 
+    pub fn init(domain: u32, socket_type: u32, flags: u32) !Self {
+        return Self{ .socket = try Socket.init(domain, socket_type | os.SOCK_NONBLOCK, flags) };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.socket.deinit();
+    }
+
     pub fn shutdown(self: *Self, how: os.ShutdownHow) !void {
         return self.socket.shutdown(how);
     }
@@ -101,14 +109,14 @@ pub const AsyncSocket = struct {
     }
 
     pub fn connect(self: *Self, address: net.Address) (os.ConnectError || AsyncParker.Error)!void {
-        self.tryConnect(address) catch |err| switch (err) {
-            error.WouldBlock => {
-                try self.writable.wait();
-            },
-            else => return err,
-        };
-
-        return self.socket.getError();
+        while (true) {
+            return self.tryConnect(address) catch |err| switch (err) {
+                error.WouldBlock => {
+                    try self.writable.wait();
+                },
+                else => return err,
+            };
+        }
     }
 
     pub fn accept(self: *Self, flags: u32) (os.AcceptError || AsyncParker.Error)!Socket.Connection {
@@ -169,4 +177,112 @@ pub const AsyncSocket = struct {
 
 test {
     testing.refAllDecls(@This());
+}
+
+test "socket/async" {
+    hyperia.init();
+    defer hyperia.deinit();
+
+    const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
+    defer reactor.deinit();
+
+    var a = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer a.deinit();
+
+    try reactor.add(a.socket.fd, &a, .{ .readable = true });
+    try reactor.poll(1, struct {
+        expected_data: usize,
+
+        pub fn call(self: @This(), event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = self.expected_data,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = false,
+                },
+                event,
+            );
+        }
+    }{ .expected_data = @ptrToInt(&a) }, null);
+
+    try a.bind(net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 0));
+    try a.listen(128);
+
+    const binded_address = try a.getName();
+
+    var b = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+    defer b.deinit();
+
+    try reactor.add(b.socket.fd, &b, .{ .readable = true, .writable = true });
+    try reactor.poll(1, struct {
+        expected_data: usize,
+
+        pub fn call(self: @This(), event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = self.expected_data,
+                    .is_error = false,
+                    .is_hup = true,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+        }
+    }{ .expected_data = @ptrToInt(&b) }, null);
+
+    var connect_frame = async b.connect(binded_address);
+
+    try reactor.poll(1, struct {
+        expected_data: usize,
+
+        pub fn call(self: @This(), event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = self.expected_data,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = false,
+                    .is_writable = true,
+                },
+                event,
+            );
+
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
+
+            const socket = @intToPtr(*AsyncSocket, event.data);
+            socket.onEvent(&batch, event);
+        }
+    }{ .expected_data = @ptrToInt(&b) }, null);
+
+    try nosuspend await connect_frame;
+
+    try reactor.poll(1, struct {
+        expected_data: usize,
+
+        pub fn call(self: @This(), event: Reactor.Event) void {
+            testing.expectEqual(
+                Reactor.Event{
+                    .data = self.expected_data,
+                    .is_error = false,
+                    .is_hup = false,
+                    .is_readable = true,
+                    .is_writable = false,
+                },
+                event,
+            );
+
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
+
+            const socket = @intToPtr(*AsyncSocket, event.data);
+            socket.onEvent(&batch, event);
+        }
+    }{ .expected_data = @ptrToInt(&a) }, null);
+
+    var ab = try nosuspend a.accept(os.SOCK_CLOEXEC);
+    defer ab.socket.deinit();
 }

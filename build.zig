@@ -22,23 +22,18 @@ pub fn build(b: *Builder) void {
     const mode = b.standardReleaseOptions();
 
     const test_step = b.step("test", "Run library tests.");
+    const test_filter = b.option([]const u8, "test-filter", "Test filter");
 
-    inline for (.{
-        "hyperia.zig",
-        "object_pool.zig",
-        "reactor.zig",
-        "mpsc.zig",
-        "socket.zig",
-        "async_socket.zig",
-        "async_parker.zig",
-    }) |file_path| {
-        const file = b.addTest(file_path);
-        file.setTarget(target);
-        file.setBuildMode(mode);
-        file.addPackage(pkgs.zap);
-        file.addPackage(pkgs.hyperia);
-        file.linkLibC();
+    const file = b.addTest("hyperia.zig");
+    file.setTarget(target);
+    file.setBuildMode(mode);
+    file.addPackage(pkgs.zap);
+    file.addPackage(pkgs.hyperia);
+    file.linkLibC();
 
-        test_step.dependOn(&file.step);
+    if (test_filter != null) {
+        file.setFilter(test_filter.?);
     }
+
+    test_step.dependOn(&file.step);
 }

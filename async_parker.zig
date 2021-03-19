@@ -34,7 +34,7 @@ pub const AsyncParker = struct {
             var state = @atomicLoad(usize, &self.state, .Monotonic);
 
             while (true) {
-                state = @cmpxchgWeak(usize, &self.state, state, switch (state) {
+                const new_state = switch (state) {
                     EMPTY => @ptrToInt(&node),
                     NOTIFIED => EMPTY,
                     CLOSED => {
@@ -43,7 +43,9 @@ pub const AsyncParker = struct {
                         break;
                     },
                     else => unreachable,
-                }, .Release, .Monotonic) orelse {
+                };
+
+                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Monotonic) orelse {
                     if (state == NOTIFIED) {
                         hyperia.pool.schedule(.{}, &node.runnable);
                     }
@@ -61,10 +63,12 @@ pub const AsyncParker = struct {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
 
         while (true) {
-            state = @cmpxchgWeak(usize, &self.state, state, switch (state) {
+            const new_state = switch (state) {
                 EMPTY, NOTIFIED, CLOSED => return null,
                 else => EMPTY,
-            }, .Acquire, .Monotonic) orelse {
+            };
+
+            state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
                 const node = @intToPtr(*Node, state);
                 node.cancelled = true;
                 return &node.runnable;
@@ -76,11 +80,13 @@ pub const AsyncParker = struct {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
 
         while (true) {
-            state = @cmpxchgWeak(usize, &self.state, state, switch (state) {
+            const new_state = switch (state) {
                 EMPTY => NOTIFIED,
                 NOTIFIED, CLOSED => return null,
                 else => EMPTY,
-            }, .Acquire, .Monotonic) orelse {
+            };
+
+            state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
                 if (state == EMPTY) return null;
                 const node = @intToPtr(*Node, state);
                 return &node.runnable;
