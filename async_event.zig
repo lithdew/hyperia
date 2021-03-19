@@ -8,71 +8,36 @@ const testing = std.testing;
 
 const assert = std.debug.assert;
 
-pub const AsyncEvent = struct {
+pub const AsyncAutoResetEvent = struct {
     const Self = @This();
 
     fd: os.fd_t,
+    reactor: Reactor,
     notified: bool = true,
+    handle: Reactor.Handle = .{ .onEventFn = onEvent },
 
-    pub fn init(flags: u32) !Self {
-        return Self{ .fd = try os.eventfd(0, flags | os.EFD_NONBLOCK) };
+    pub fn init(flags: u32, reactor: Reactor) !Self {
+        return Self{ .fd = try os.eventfd(0, flags | os.EFD_NONBLOCK), .reactor = reactor };
     }
 
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         os.close(self.fd);
     }
 
     pub fn post(self: *Self) void {
         if (!@atomicRmw(bool, &self.notified, .Xchg, false, .AcqRel)) return;
 
-        const num_bytes = os.write(self.fd, mem.asBytes(&@as(u64, 1))) catch |err| switch (err) {
-            error.WouldBlock => 8,
-            error.NotOpenForWriting => return,
-            else => unreachable,
-        };
-
-        assert(num_bytes == @sizeOf(u64));
-    }
-
-    pub fn reset(self: *Self) void {
-        var counter: u64 = undefined;
-        while (true) {
-            const num_bytes = os.read(self.fd, mem.asBytes(&counter)) catch |err| switch (err) {
-                error.WouldBlock => break,
-                else => unreachable,
-            };
-
-            assert(num_bytes == @sizeOf(u64));
-        }
-
-        @atomicStore(bool, &self.notified, true, .Release);
-    }
-};
-
-pub const AsyncAutoResetEvent = struct {
-    const Self = @This();
-
-    event: AsyncEvent,
-    handle: Reactor.Handle = .{ .onEventFn = onEvent },
-
-    pub fn init(flags: u32) !Self {
-        return Self{ .event = try AsyncEvent.init(flags) };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.event.deinit();
-    }
-
-    pub fn post(self: *Self) void {
-        self.event.post();
+        os.epoll_ctl(self.reactor.fd, os.EPOLL_CTL_MOD, self.fd, &os.epoll_event{
+            .events = os.EPOLLONESHOT | os.EPOLLOUT,
+            .data = .{ .ptr = @ptrToInt(&self.handle) },
+        }) catch {};
     }
 
     pub fn onEvent(handle: *Reactor.Handle, batch: *zap.Pool.Batch, event: Reactor.Event) void {
-        const self = @fieldParentPtr(AsyncAutoResetEvent, "handle", handle);
+        assert(event.is_writable);
 
-        if (event.is_readable) {
-            self.event.reset();
-        }
+        const self = @fieldParentPtr(AsyncAutoResetEvent, "handle", handle);
+        @atomicStore(bool, &self.notified, true, .Release);
     }
 };
 
@@ -80,10 +45,16 @@ test "auto_reset_event/async: post a notification 1000 times" {
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
 
-    var test_event = try AsyncAutoResetEvent.init(os.EFD_CLOEXEC);
+    var test_event = try AsyncAutoResetEvent.init(os.EFD_CLOEXEC, reactor);
     defer test_event.deinit();
 
-    try reactor.add(test_event.event.fd, &test_event.handle, .{ .readable = true });
+    try reactor.add(test_event.fd, &test_event.handle, .{});
+
+    try reactor.poll(1, struct {
+        pub fn call(event: Reactor.Event) void {
+            unreachable;
+        }
+    }, 0);
 
     // Registering an eventfd to epoll will not trigger a notification.
     // Deregistering an eventfd from epoll will not trigger a notification.
@@ -105,5 +76,5 @@ test "auto_reset_event/async: post a notification 1000 times" {
         }, null);
     }
 
-    testing.expect(@atomicLoad(bool, &test_event.event.notified, .Monotonic));
+    testing.expect(@atomicLoad(bool, &test_event.notified, .Monotonic));
 }
