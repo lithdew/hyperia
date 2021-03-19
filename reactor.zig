@@ -1,4 +1,5 @@
 const std = @import("std");
+const zap = @import("zap");
 const Socket = @import("socket.zig").Socket;
 
 const os = std.os;
@@ -9,6 +10,14 @@ const testing = std.testing;
 const print = std.debug.print;
 
 pub const Reactor = struct {
+    pub const Handle = struct {
+        onEventFn: fn (handle: *Reactor.Handle, batch: *zap.Pool.Batch, event: Reactor.Event) void,
+
+        pub fn call(self: *Reactor.Handle, batch: *zap.Pool.Batch, event: Reactor.Event) void {
+            (self.onEventFn)(self, batch, event);
+        }
+    };
+
     pub const Event = struct {
         data: usize,
         is_error: bool,

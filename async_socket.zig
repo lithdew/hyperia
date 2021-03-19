@@ -15,6 +15,7 @@ pub const AsyncSocket = struct {
     socket: Socket,
     readable: AsyncParker = .{},
     writable: AsyncParker = .{},
+    handle: Reactor.Handle = .{ .onEventFn = onEvent },
 
     pub fn init(domain: u32, socket_type: u32, flags: u32) !Self {
         return Self{ .socket = try Socket.init(domain, socket_type | os.SOCK_NONBLOCK, flags) };
@@ -154,7 +155,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn onEvent(self: *Self, batch: *zap.Pool.Batch, event: Reactor.Event) void {
+    pub fn onEvent(handle: *Reactor.Handle, batch: *zap.Pool.Batch, event: Reactor.Event) void {
+        const self = @fieldParentPtr(AsyncSocket, "handle", handle);
+
         if (event.is_readable) {
             if (self.readable.notify()) |runnable| {
                 batch.push(runnable);
@@ -189,7 +192,7 @@ test "socket/async" {
     var a = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer a.deinit();
 
-    try reactor.add(a.socket.fd, &a, .{ .readable = true });
+    try reactor.add(a.socket.fd, &a.handle, .{ .readable = true });
     try reactor.poll(1, struct {
         expected_data: usize,
 
@@ -205,7 +208,7 @@ test "socket/async" {
                 event,
             );
         }
-    }{ .expected_data = @ptrToInt(&a) }, null);
+    }{ .expected_data = @ptrToInt(&a.handle) }, null);
 
     try a.bind(net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 0));
     try a.listen(128);
@@ -215,7 +218,7 @@ test "socket/async" {
     var b = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer b.deinit();
 
-    try reactor.add(b.socket.fd, &b, .{ .readable = true, .writable = true });
+    try reactor.add(b.socket.fd, &b.handle, .{ .readable = true, .writable = true });
     try reactor.poll(1, struct {
         expected_data: usize,
 
@@ -231,7 +234,7 @@ test "socket/async" {
                 event,
             );
         }
-    }{ .expected_data = @ptrToInt(&b) }, null);
+    }{ .expected_data = @ptrToInt(&b.handle) }, null);
 
     var connect_frame = async b.connect(binded_address);
 
@@ -253,10 +256,10 @@ test "socket/async" {
             var batch: zap.Pool.Batch = .{};
             defer hyperia.pool.schedule(.{}, batch);
 
-            const socket = @intToPtr(*AsyncSocket, event.data);
-            socket.onEvent(&batch, event);
+            const handle = @intToPtr(*Reactor.Handle, event.data);
+            handle.call(&batch, event);
         }
-    }{ .expected_data = @ptrToInt(&b) }, null);
+    }{ .expected_data = @ptrToInt(&b.handle) }, null);
 
     try nosuspend await connect_frame;
 
@@ -278,10 +281,10 @@ test "socket/async" {
             var batch: zap.Pool.Batch = .{};
             defer hyperia.pool.schedule(.{}, batch);
 
-            const socket = @intToPtr(*AsyncSocket, event.data);
-            socket.onEvent(&batch, event);
+            const handle = @intToPtr(*Reactor.Handle, event.data);
+            handle.call(&batch, event);
         }
-    }{ .expected_data = @ptrToInt(&a) }, null);
+    }{ .expected_data = @ptrToInt(&a.handle) }, null);
 
     var ab = try nosuspend a.accept(os.SOCK_CLOEXEC);
     defer ab.socket.deinit();
