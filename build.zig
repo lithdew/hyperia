@@ -27,6 +27,7 @@ pub fn build(b: *Builder) void {
         "hyperia.zig",
         "object_pool.zig",
         "reactor.zig",
+        "mpsc.zig",
         "socket.zig",
         "async_socket.zig",
         "async_parker.zig",

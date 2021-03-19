@@ -143,20 +143,20 @@ test "sink: push and pop 600,000 u64s with 15 producers" {
 
     var sink: TestSink = .{};
 
-    const consumer = try std.Thread.spawn(Context{
+    const consumer = try std.Thread.spawn(Context.runConsumer, Context{
         .allocator = allocator,
         .sink = &sink,
-    }, Context.runConsumer);
+    });
     defer consumer.wait();
 
     var producers: [NUM_PRODUCERS]*std.Thread = undefined;
     defer for (producers) |producer| producer.wait();
 
     for (producers) |*producer| {
-        producer.* = try std.Thread.spawn(Context{
+        producer.* = try std.Thread.spawn(Context.runProducer, Context{
             .allocator = allocator,
             .sink = &sink,
-        }, Context.runProducer);
+        });
     }
 }
 
@@ -215,19 +215,19 @@ test "sink: batch push and pop 600,000 u64s with 15 producers" {
 
     var sink: TestSink = .{};
 
-    const consumer = try std.Thread.spawn(Context{
+    const consumer = try std.Thread.spawn(Context.runBatchConsumer, Context{
         .allocator = allocator,
         .sink = &sink,
-    }, Context.runBatchConsumer);
+    });
     defer consumer.wait();
 
     var producers: [NUM_PRODUCERS]*std.Thread = undefined;
     defer for (producers) |producer| producer.wait();
 
     for (producers) |*producer| {
-        producer.* = try std.Thread.spawn(Context{
+        producer.* = try std.Thread.spawn(Context.runBatchProducer, Context{
             .allocator = allocator,
             .sink = &sink,
-        }, Context.runBatchProducer);
+        });
     }
 }
