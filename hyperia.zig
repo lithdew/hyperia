@@ -19,7 +19,7 @@ pub const AsyncParker = @import("async_parker.zig").AsyncParker;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
 
 pub var gpa: heap.GeneralPurposeAllocator(.{}) = undefined;
-pub var allocator: mem.Allocator = undefined;
+pub var allocator: *mem.Allocator = undefined;
 
 pub var pool: zap.Pool = undefined;
 
@@ -28,6 +28,7 @@ pub fn init() void {
     if (builtin.link_libc) {
         gpa.backing_allocator = heap.c_allocator;
     }
+    allocator = &gpa.allocator;
 
     pool = zap.Pool.init(.{});
 }
