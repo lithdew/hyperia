@@ -1,6 +1,5 @@
 const std = @import("std");
 const zap = @import("zap");
-const hyperia = @import("hyperia");
 const Reactor = @import("reactor.zig").Reactor;
 
 const os = std.os;
