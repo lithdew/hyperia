@@ -21,12 +21,16 @@ pub const Server = struct {
         frame: @Frame(Connection.start),
 
         pub fn start(self: *Connection) !void {
-            defer if (self.server.close(self.address)) {
-                suspend {
-                    self.socket.deinit();
-                    self.server.wga.allocator.destroy(self);
+            defer {
+                log.info("{} has disconnected", .{self.address});
+
+                if (self.server.close(self.address)) {
+                    suspend {
+                        self.socket.deinit();
+                        self.server.wga.allocator.destroy(self);
+                    }
                 }
-            };
+            }
 
             var buf: [4096]u8 = undefined;
             while (true) {
