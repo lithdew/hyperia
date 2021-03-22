@@ -38,7 +38,7 @@ pub const Request = struct {
         var method: []const u8 = undefined;
         var path: []const u8 = undefined;
         var minor_version: c_int = undefined;
-        var num_headers: usize = undefined;
+        var num_headers: usize = src.len;
 
         const rc = c.phr_parse_request(
             buf.ptr,
@@ -109,7 +109,7 @@ pub const Response = struct {
         var minor_version: c_int = undefined;
         var status_code: c_int = undefined;
         var status: []const u8 = undefined;
-        var num_headers: usize = undefined;
+        var num_headers: usize = src.len;
 
         const rc = c.phr_parse_response(
             buf.ptr,
@@ -166,7 +166,7 @@ pub const Headers = struct {
     headers: []const Header,
 
     pub fn parse(buf: []const u8, src: []Header) !Headers {
-        var num_headers: usize = undefined;
+        var num_headers: usize = src.len;
 
         const rc = c.phr_parse_headers(
             buf.ptr,
