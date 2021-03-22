@@ -25,6 +25,10 @@ pub const AsyncSocket = struct {
         self.socket.deinit();
     }
 
+    pub fn from(socket: Socket) Self {
+        return Self{ .socket = socket };
+    }
+
     pub fn shutdown(self: *Self, how: os.ShutdownHow) !void {
         return self.socket.shutdown(how);
     }
@@ -290,6 +294,6 @@ test "socket/async" {
         }
     }{ .expected_data = @ptrToInt(&a.handle) }, null);
 
-    var ab = try nosuspend a.accept(os.SOCK_CLOEXEC);
+    var ab = try nosuspend a.accept(os.SOCK_CLOEXEC | os.SOCK_NONBLOCK);
     defer ab.socket.deinit();
 }
