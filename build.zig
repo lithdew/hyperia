@@ -24,6 +24,7 @@ pub const pkgs = struct {
 
 pub fn register(step: *std.build.LibExeObjStep) void {
     step.addCSourceFile("picohttp/lib/picohttpparser.c", &[_][]const u8{});
+    step.addIncludeDir("picohttp/lib");
     step.linkLibC();
 
     step.addPackage(pkgs.zap);
@@ -51,6 +52,7 @@ pub fn build(b: *Builder) void {
 
     inline for (.{
         "example_tcp_server",
+        "example_http_server",
     }) |example_name| {
         const example_step = b.step(example_name, "Example " ++ example_name ++ ".zig");
 
