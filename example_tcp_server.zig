@@ -11,6 +11,8 @@ const net = std.net;
 const mem = std.mem;
 const log = std.log.scoped(.server);
 
+pub const log_level = .debug;
+
 var stopped: bool = false;
 
 pub const Server = struct {
