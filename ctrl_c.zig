@@ -48,3 +48,15 @@ fn handler(signal: c_int) callconv(.C) void {
         hyperia.pool.schedule(.{}, runnable);
     }
 }
+
+test "ctrl_c: manually raise ctrl+c event" {
+    hyperia.init();
+    defer hyperia.deinit();
+
+    init();
+    defer deinit();
+
+    var frame = async wait();
+    try os.raise(os.SIGINT);
+    nosuspend await frame;
+}
