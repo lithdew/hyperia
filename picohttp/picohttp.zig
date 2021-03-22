@@ -5,6 +5,16 @@ const fmt = std.fmt;
 
 const assert = std.debug.assert;
 
+pub fn addTo(step: *std.build.LibExeObjStep, comptime dir: []const u8) void {
+    step.addCSourceFile(dir ++ "/lib/picohttpparser.c", &[_][]const u8{});
+    step.addIncludeDir(dir ++ "/lib");
+
+    step.addPackage(.{
+        .name = "picohttp",
+        .path = dir ++ "/picohttp.zig",
+    });
+}
+
 pub const Header = struct {
     name: []const u8,
     value: []const u8,

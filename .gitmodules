@@ -4,3 +4,6 @@
 [submodule "picohttp/lib"]
 	path = picohttp/lib
 	url = https://github.com/h2o/picohttpparser.git
+[submodule "blake3/lib"]
+	path = blake3/lib
+	url = https://github.com/BLAKE3-team/BLAKE3.git

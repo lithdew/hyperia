@@ -15,21 +15,16 @@ pub const pkgs = struct {
             zap,
         },
     };
-
-    pub const picohttp = Pkg{
-        .name = "picohttp",
-        .path = "picohttp/picohttp.zig",
-    };
 };
 
 pub fn register(step: *std.build.LibExeObjStep) void {
-    step.addCSourceFile("picohttp/lib/picohttpparser.c", &[_][]const u8{});
-    step.addIncludeDir("picohttp/lib");
     step.linkLibC();
 
     step.addPackage(pkgs.zap);
     step.addPackage(pkgs.hyperia);
-    step.addPackage(pkgs.picohttp);
+
+    @import("picohttp/picohttp.zig").addTo(step, "picohttp");
+    @import("blake3/blake3.zig").addTo(step, "blake3");
 }
 
 pub fn build(b: *Builder) void {
