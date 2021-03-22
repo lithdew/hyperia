@@ -2,15 +2,6 @@ const std = @import("std");
 const Pkg = std.build.Pkg;
 const Builder = std.build.Builder;
 
-pub fn register(step: *std.build.LibExeObjStep) void {
-    step.linkLibC();
-
-    step.addPackage(pkgs.zap);
-    step.addPackage(pkgs.hyperia);
-
-    @import("picohttp/picohttp.zig").addTo(step, "picohttp");
-}
-
 pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
