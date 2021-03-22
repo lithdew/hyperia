@@ -1,3 +1,6 @@
 [submodule "zap"]
 	path = zap
 	url = https://github.com/kprotty/zap
+[submodule "picohttp/lib"]
+	path = picohttp/lib
+	url = https://github.com/h2o/picohttpparser.git

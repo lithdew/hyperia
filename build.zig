@@ -15,7 +15,21 @@ pub const pkgs = struct {
             zap,
         },
     };
+
+    pub const picohttp = Pkg{
+        .name = "picohttp",
+        .path = "picohttp/picohttp.zig",
+    };
 };
+
+pub fn register(step: *std.build.LibExeObjStep) void {
+    step.addCSourceFile("picohttp/lib/picohttpparser.c", &[_][]const u8{});
+    step.linkLibC();
+
+    step.addPackage(pkgs.zap);
+    step.addPackage(pkgs.hyperia);
+    step.addPackage(pkgs.picohttp);
+}
 
 pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
@@ -27,9 +41,7 @@ pub fn build(b: *Builder) void {
     const file = b.addTest("hyperia.zig");
     file.setTarget(target);
     file.setBuildMode(mode);
-    file.addPackage(pkgs.zap);
-    file.addPackage(pkgs.hyperia);
-    file.linkLibC();
+    register(file);
 
     if (test_filter != null) {
         file.setFilter(test_filter.?);
@@ -45,9 +57,7 @@ pub fn build(b: *Builder) void {
         const exe = b.addExecutable(example_name, example_name ++ ".zig");
         exe.setTarget(target);
         exe.setBuildMode(mode);
-        exe.addPackage(pkgs.zap);
-        exe.addPackage(pkgs.hyperia);
-        exe.linkLibC();
+        register(exe);
         exe.install();
 
         const exe_run = exe.run();
