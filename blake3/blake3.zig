@@ -1,7 +1,9 @@
 const std = @import("std");
 const c = @cImport(@cInclude("blake3.h"));
 
+const fmt = std.fmt;
 const mem = std.mem;
+const testing = std.testing;
 
 pub fn addTo(step: *std.build.LibExeObjStep, comptime dir: []const u8) void {
     step.linkLibC();
@@ -58,7 +60,7 @@ pub const Hasher = struct {
     }
 };
 
-pub fn hash(buf: []const u8) [32]u8 {
+pub fn hash(buf: []const u8) callconv(.Inline) [32]u8 {
     var hasher = Hasher.init();
     hasher.update(buf);
 
@@ -69,6 +71,5 @@ pub fn hash(buf: []const u8) [32]u8 {
 }
 
 test "blake3: hash 'hello world" {
-    var digest = hash("hello world");
-    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&digest)});
+    try testing.expectFmt("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24", "{s}", .{fmt.fmtSliceHexLower(&hash("hello world"))});
 }

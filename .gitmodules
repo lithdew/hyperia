@@ -7,3 +7,6 @@
 [submodule "blake3/lib"]
 	path = blake3/lib
 	url = https://github.com/BLAKE3-team/BLAKE3.git
+[submodule "ed25519_donna/lib"]
+	path = ed25519_donna/lib
+	url = https://github.com/floodyberry/ed25519-donna.git
