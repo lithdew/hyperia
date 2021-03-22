@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 
 pub const mpsc = @import("mpsc.zig");
 pub const timer = @import("timer.zig");
+pub const ctrl_c = @import("ctrl_c.zig");
 
 pub const ObjectPool = @import("object_pool.zig").ObjectPool;
 

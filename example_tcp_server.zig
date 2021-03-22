@@ -9,7 +9,9 @@ const os = std.os;
 const net = std.net;
 const log = std.log.scoped(.server);
 
-pub fn loop(reactor: Reactor, listener: *AsyncSocket) !void {
+var stopped: bool = false;
+
+pub fn accept(reactor: Reactor, listener: *AsyncSocket) !void {
     while (true) {
         var conn = try listener.accept(os.SOCK_CLOEXEC);
         defer conn.socket.deinit();
@@ -18,12 +20,11 @@ pub fn loop(reactor: Reactor, listener: *AsyncSocket) !void {
     }
 }
 
-pub fn main() !void {
-    hyperia.init();
-    defer hyperia.deinit();
-
-    const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
-    defer reactor.deinit();
+pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
+    defer {
+        @atomicStore(bool, &stopped, true, .Release);
+        reactor_event.post();
+    }
 
     var listener = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
     defer listener.deinit();
@@ -36,15 +37,39 @@ pub fn main() !void {
 
     log.info("listening for connections on: {}", .{try listener.getName()});
 
-    var frame = async loop(reactor, &listener);
-    defer nosuspend await frame catch {};
+    var accept_frame = async accept(reactor, &listener);
+    defer await accept_frame catch {};
 
-    while (true) {
+    hyperia.ctrl_c.wait();
+    try listener.shutdown(.recv);
+
+    log.info("shutting down...", .{});
+}
+
+pub fn main() !void {
+    hyperia.init();
+    defer hyperia.deinit();
+
+    hyperia.ctrl_c.init();
+    defer hyperia.ctrl_c.deinit();
+
+    const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
+    defer reactor.deinit();
+
+    var reactor_event = try AsyncAutoResetEvent.init(os.EFD_CLOEXEC, reactor);
+    defer reactor_event.deinit();
+
+    try reactor.add(reactor_event.fd, &reactor_event.handle, .{});
+
+    var frame = async runApp(reactor, &reactor_event);
+
+    while (!@atomicLoad(bool, &stopped, .Acquire)) {
         const EventProcessor = struct {
             batch: zap.Pool.Batch = .{},
 
             pub fn call(self: *@This(), event: Reactor.Event) void {
                 log.info("got event: {}", .{event});
+
                 const handle = @intToPtr(*Reactor.Handle, event.data);
                 handle.call(&self.batch, event);
             }
@@ -55,4 +80,8 @@ pub fn main() !void {
 
         try reactor.poll(128, &processor, null);
     }
+
+    try nosuspend await frame;
+
+    log.info("good bye!", .{});
 }
