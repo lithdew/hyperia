@@ -95,7 +95,7 @@ pub const AsyncParker = struct {
     }
 
     pub fn close(self: *Self) ?*zap.Pool.Runnable {
-        switch (@atomicRmw(usize, &self.state, .Xchg, 2, .AcqRel)) {
+        switch (@atomicRmw(usize, &self.state, .Xchg, CLOSED, .AcqRel)) {
             EMPTY, NOTIFIED, CLOSED => return null,
             else => |state| {
                 const node = @intToPtr(*Node, state);
