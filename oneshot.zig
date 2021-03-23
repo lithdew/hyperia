@@ -4,6 +4,87 @@ const hyperia = @import("hyperia.zig");
 
 const testing = std.testing;
 
+pub const Signal = struct {
+    const Self = @This();
+
+    const Node = struct {
+        next: ?*Node = null,
+        runnable: zap.Pool.Runnable = .{ .runFn = run },
+        frame: anyframe,
+
+        pub fn run(runnable: *zap.Pool.Runnable) void {
+            const self = @fieldParentPtr(Node, "runnable", runnable);
+            resume self.frame;
+        }
+    };
+
+    const EMPTY = 0;
+    const CLOSED = 1;
+
+    state: usize = EMPTY,
+
+    pub fn wait(self: *Self) void {
+        var node: Node = .{ .frame = @frame() };
+
+        suspend {
+            var state = @atomicLoad(usize, &self.state, .Monotonic);
+
+            while (true) {
+                const new_state = switch (state) {
+                    EMPTY => update: {
+                        node.next = null;
+                        break :update @ptrToInt(&node);
+                    },
+                    CLOSED => {
+                        hyperia.pool.schedule(.{}, &node.runnable);
+                        break;
+                    },
+                    else => update: {
+                        node.next = @intToPtr(?*Node, state);
+                        break :update @ptrToInt(&node);
+                    },
+                };
+
+                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Monotonic) orelse break;
+            }
+        }
+    }
+
+    pub fn close(self: *Self) zap.Pool.Batch {
+        var batch: zap.Pool.Batch = .{};
+
+        const state = @atomicRmw(usize, &self.state, .Xchg, CLOSED, .AcqRel);
+        if (state == EMPTY or state == CLOSED) return batch;
+
+        var it = @intToPtr(?*Node, state);
+        while (it) |node| : (it = node.next) {
+            batch.push(&node.runnable);
+        }
+
+        return batch;
+    }
+
+    pub fn set(self: *Self) zap.Pool.Batch {
+        var batch: zap.Pool.Batch = .{};
+
+        var state = @atomicLoad(usize, &self.state, .Monotonic);
+        while (true) {
+            const new_state = switch (state) {
+                EMPTY, CLOSED => return batch,
+                else => @as(usize, EMPTY),
+            };
+
+            state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
+                var it = @intToPtr(?*Node, state);
+                while (it) |node| : (it = node.next) {
+                    batch.push(&node.runnable);
+                }
+                return batch;
+            };
+        }
+    }
+};
+
 pub fn Channel(comptime T: type) type {
     return struct {
         const Self = @This();

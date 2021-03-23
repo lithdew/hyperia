@@ -4,9 +4,9 @@ const hyperia = @import("hyperia.zig");
 const os = std.os;
 const mem = std.mem;
 
-const AsyncParker = hyperia.AsyncParker;
+const oneshot = hyperia.oneshot;
 
-var parker: AsyncParker = .{};
+var signal: oneshot.Signal = .{};
 
 var last_sigaction: os.Sigaction = .{
     .handler = .{ .handler = null },
@@ -29,24 +29,18 @@ pub fn init() void {
 
 pub fn deinit() void {
     os.sigaction(os.SIGINT, &last_sigaction, null);
+    hyperia.pool.schedule(.{}, signal.close());
 
-    if (parker.close()) |runnable| {
-        hyperia.pool.schedule(.{}, runnable);
-    }
-
-    parker = .{};
+    signal = .{};
 }
 
 pub fn wait() void {
-    parker.wait() catch {};
+    signal.wait();
 }
 
-fn handler(signal: c_int) callconv(.C) void {
-    if (signal != os.SIGINT) return;
-
-    if (parker.notify()) |runnable| {
-        hyperia.pool.schedule(.{}, runnable);
-    }
+fn handler(signum: c_int) callconv(.C) void {
+    if (signum != os.SIGINT) return;
+    hyperia.pool.schedule(.{}, signal.set());
 }
 
 test "ctrl_c: manually raise ctrl+c event" {
