@@ -46,7 +46,6 @@ pub const Server = struct {
     };
 
     listener: AsyncSocket,
-    frame: @Frame(Server.accept),
 
     wga: AsyncWaitGroupAllocator,
     lock: std.Thread.Mutex = .{},
@@ -55,15 +54,11 @@ pub const Server = struct {
     pub fn init(allocator: *mem.Allocator) Server {
         return Server{
             .listener = undefined,
-            .frame = undefined,
             .wga = .{ .backing_allocator = allocator },
         };
     }
 
     pub fn deinit(self: *Server, allocator: *mem.Allocator) void {
-        self.listener.shutdown(.recv) catch {};
-        await self.frame catch {};
-
         {
             const held = self.lock.acquire();
             defer held.release();
@@ -77,7 +72,11 @@ pub const Server = struct {
         self.connections.deinit(allocator);
     }
 
-    pub fn start(self: *Server, allocator: *mem.Allocator, reactor: Reactor, address: net.Address) !void {
+    pub fn shutdown(self: *Server) void {
+        self.listener.shutdown(.recv) catch {};
+    }
+
+    pub fn start(self: *Server, reactor: Reactor, address: net.Address) !void {
         self.listener = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
         errdefer self.listener.deinit();
 
@@ -88,8 +87,6 @@ pub const Server = struct {
         try self.listener.listen(128);
 
         log.info("listening for connections on: {}", .{try self.listener.getName()});
-
-        self.frame = async self.accept(allocator, reactor);
     }
 
     fn accept(self: *Server, allocator: *mem.Allocator, reactor: Reactor) !void {
@@ -140,11 +137,46 @@ pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
     defer server.deinit(hyperia.allocator);
 
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
-    try server.start(hyperia.allocator, reactor, address);
+    try server.start(reactor, address);
 
-    hyperia.ctrl_c.wait();
+    const Channel = hyperia.oneshot.Channel(union(enum) {
+        server: anyerror!void,
+        ctrl_c: void,
+    });
+
+    var channel: Channel = .{};
+
+    var server_frame = async struct {
+        fn call(ctx: *Channel, s: *Server, r: Reactor) void {
+            ctx.put(.{ .server = s.accept(hyperia.allocator, r) });
+        }
+    }.call(&channel, &server, reactor);
+
+    var ctrl_c_frame = async struct {
+        fn call(ctx: *Channel) void {
+            hyperia.ctrl_c.wait();
+            ctx.put(.ctrl_c);
+        }
+    }.call(&channel);
+
+    const case = channel.wait();
 
     log.info("shutting down...", .{});
+
+    switch (case) {
+        .server => |result| {
+            hyperia.ctrl_c.cancel();
+            await ctrl_c_frame;
+
+            return result;
+        },
+        .ctrl_c => |result| {
+            server.shutdown();
+            await server_frame;
+
+            return result;
+        },
+    }
 }
 
 pub fn main() !void {

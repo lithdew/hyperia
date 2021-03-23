@@ -79,7 +79,6 @@ pub const Server = struct {
     };
 
     listener: AsyncSocket,
-    frame: @Frame(Server.accept),
 
     wga: AsyncWaitGroupAllocator,
     lock: std.Thread.Mutex = .{},
@@ -88,7 +87,6 @@ pub const Server = struct {
     pub fn init(allocator: *mem.Allocator) Server {
         return Server{
             .listener = undefined,
-            .frame = undefined,
             .wga = .{ .backing_allocator = allocator },
         };
     }
@@ -174,7 +172,10 @@ pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
     try server.start(reactor, address);
 
-    const Channel = hyperia.oneshot.Channel(union(enum) { server: anyerror!void, ctrl_c: void });
+    const Channel = hyperia.oneshot.Channel(union(enum) {
+        server: anyerror!void,
+        ctrl_c: void,
+    });
 
     var channel: Channel = .{};
 
