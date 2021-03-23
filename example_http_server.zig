@@ -17,8 +17,6 @@ pub const log_level = .debug;
 
 var stopped: bool = false;
 
-const Channel = hyperia.oneshot.Channel(union(enum) { server: anyerror!void, ctrl_c: void });
-
 pub const Server = struct {
     pub const Connection = struct {
         server: *Server,
@@ -126,9 +124,7 @@ pub const Server = struct {
         log.info("listening for connections on: {}", .{try self.listener.getName()});
     }
 
-    fn accept(self: *Server, channel: *Channel, allocator: *mem.Allocator, reactor: Reactor) !void {
-        errdefer |err| channel.put(.{ .server = err });
-
+    fn accept(self: *Server, allocator: *mem.Allocator, reactor: Reactor) !void {
         while (true) {
             var conn = try self.listener.accept(os.SOCK_CLOEXEC | os.SOCK_NONBLOCK);
             errdefer conn.socket.deinit();
@@ -155,8 +151,6 @@ pub const Server = struct {
 
             connection.frame = async connection.start();
         }
-
-        return channel.put(.server);
     }
 
     fn close(self: *Server, address: net.Address) bool {
@@ -180,14 +174,20 @@ pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
     try server.start(reactor, address);
 
+    const Channel = hyperia.oneshot.Channel(union(enum) { server: anyerror!void, ctrl_c: void });
+
     var channel: Channel = .{};
 
-    var server_frame = async server.accept(&channel, hyperia.allocator, reactor);
+    var server_frame = async struct {
+        fn call(ctx: *Channel, s: *Server, r: Reactor) void {
+            ctx.put(.{ .server = s.accept(hyperia.allocator, r) });
+        }
+    }.call(&channel, &server, reactor);
 
     var ctrl_c_frame = async struct {
-        fn call(self: *Channel) void {
+        fn call(ctx: *Channel) void {
             hyperia.ctrl_c.wait();
-            self.put(.ctrl_c);
+            ctx.put(.ctrl_c);
         }
     }.call(&channel);
 
@@ -204,7 +204,7 @@ pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
         },
         .ctrl_c => |result| {
             server.shutdown();
-            await server_frame catch {};
+            await server_frame;
 
             return result;
         },
