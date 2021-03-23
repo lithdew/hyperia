@@ -63,6 +63,9 @@ test {
 }
 
 test "oneshot/channel: multiple waiters" {
+    hyperia.init();
+    defer hyperia.deinit();
+
     var channel: Channel = .{};
 
     var a = async channel.wait();
