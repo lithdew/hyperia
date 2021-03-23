@@ -38,6 +38,10 @@ pub fn wait() void {
     signal.wait();
 }
 
+pub fn cancel() void {
+    hyperia.pool.schedule(.{}, signal.set());
+}
+
 fn handler(signum: c_int) callconv(.C) void {
     if (signum != os.SIGINT) return;
     hyperia.pool.schedule(.{}, signal.set());
