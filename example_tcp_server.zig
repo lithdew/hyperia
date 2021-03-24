@@ -9,7 +9,10 @@ const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 const os = std.os;
 const net = std.net;
 const mem = std.mem;
+const builtin = std.builtin;
 const log = std.log.scoped(.server);
+
+usingnamespace hyperia.select;
 
 pub const log_level = .debug;
 
@@ -26,7 +29,7 @@ pub const Server = struct {
             defer {
                 log.info("{} has disconnected", .{self.address});
 
-                if (self.server.close(self.address)) {
+                if (self.server.deregister(self.address)) {
                     suspend {
                         self.socket.deinit();
                         self.server.wga.allocator.destroy(self);
@@ -72,7 +75,7 @@ pub const Server = struct {
         self.connections.deinit(allocator);
     }
 
-    pub fn shutdown(self: *Server) void {
+    pub fn close(self: *Server) void {
         self.listener.shutdown(.recv) catch {};
     }
 
@@ -89,7 +92,7 @@ pub const Server = struct {
         log.info("listening for connections on: {}", .{try self.listener.getName()});
     }
 
-    fn accept(self: *Server, allocator: *mem.Allocator, reactor: Reactor) !void {
+    fn accept(self: *Server, allocator: *mem.Allocator, reactor: Reactor) callconv(.Async) !void {
         while (true) {
             var conn = try self.listener.accept(os.SOCK_CLOEXEC | os.SOCK_NONBLOCK);
             errdefer conn.socket.deinit();
@@ -118,7 +121,7 @@ pub const Server = struct {
         }
     }
 
-    fn close(self: *Server, address: net.Address) bool {
+    fn deregister(self: *Server, address: net.Address) bool {
         const held = self.lock.acquire();
         defer held.release();
 
@@ -129,6 +132,7 @@ pub const Server = struct {
 
 pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
     defer {
+        log.info("shutting down...", .{});
         @atomicStore(bool, &stopped, true, .Release);
         reactor_event.post();
     }
@@ -139,43 +143,31 @@ pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
     try server.start(reactor, address);
 
-    const Channel = hyperia.oneshot.Channel(union(enum) {
-        server: anyerror!void,
-        ctrl_c: void,
-    });
-
-    var channel: Channel = .{};
-
-    var server_frame = async struct {
-        fn call(ctx: *Channel, s: *Server, r: Reactor) void {
-            ctx.put(.{ .server = s.accept(hyperia.allocator, r) });
-        }
-    }.call(&channel, &server, reactor);
-
-    var ctrl_c_frame = async struct {
-        fn call(ctx: *Channel) void {
-            hyperia.ctrl_c.wait();
-            ctx.put(.ctrl_c);
-        }
-    }.call(&channel);
-
-    const case = channel.wait();
-
-    log.info("shutting down...", .{});
-
-    switch (case) {
-        .server => |result| {
-            hyperia.ctrl_c.cancel();
-            await ctrl_c_frame;
-
-            return result;
+    const Cases = struct {
+        accept: struct {
+            run: Case(Server.accept),
+            cancel: Case(Server.close),
         },
-        .ctrl_c => |result| {
-            server.shutdown();
-            await server_frame;
-
-            return result;
+        ctrl_c: struct {
+            run: Case(hyperia.ctrl_c.wait),
+            cancel: Case(hyperia.ctrl_c.cancel),
         },
+    };
+
+    switch (select(
+        Cases{
+            .accept = .{
+                .run = call(Server.accept, .{ &server, hyperia.allocator, reactor }),
+                .cancel = call(Server.close, .{&server}),
+            },
+            .ctrl_c = .{
+                .run = call(hyperia.ctrl_c.wait, .{}),
+                .cancel = call(hyperia.ctrl_c.cancel, .{}),
+            },
+        },
+    )) {
+        .accept => |result| return result,
+        .ctrl_c => |result| return result,
     }
 }
 
