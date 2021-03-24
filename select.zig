@@ -7,20 +7,18 @@ const builtin = std.builtin;
 const oneshot = hyperia.oneshot;
 
 pub fn ResultUnionOf(comptime Cases: type) type {
-    comptime var union_fields: []const builtin.TypeInfo.UnionField = &[_]builtin.TypeInfo.UnionField{};
-    comptime var union_tag = meta.FieldEnum(Cases);
+    var union_fields: [@typeInfo(Cases).Struct.fields.len]builtin.TypeInfo.UnionField = undefined;
+    var union_tag = meta.FieldEnum(Cases);
 
-    inline for (@typeInfo(Cases).Struct.fields) |field| {
+    inline for (@typeInfo(Cases).Struct.fields) |field, i| {
         const run = meta.fieldInfo(field.field_type, .run).field_type;
         const return_type = @typeInfo(@typeInfo(run).Struct.decls[0].data.Var).Fn.return_type.?;
-        const field_alignment = if (@sizeOf(return_type) != 0) @alignOf(return_type) else 0;
+        const field_alignment = if (@sizeOf(return_type) > 0) @alignOf(return_type) else 0;
 
-        union_fields = union_fields ++ [_]builtin.TypeInfo.UnionField{
-            .{
-                .name = field.name,
-                .field_type = return_type,
-                .alignment = field_alignment,
-            },
+        union_fields[i] = .{
+            .name = field.name,
+            .field_type = return_type,
+            .alignment = field_alignment,
         };
     }
 
@@ -28,7 +26,7 @@ pub fn ResultUnionOf(comptime Cases: type) type {
         .Union = .{
             .layout = .Auto,
             .tag_type = union_tag,
-            .fields = union_fields,
+            .fields = &union_fields,
             .decls = &.{},
         },
     });
