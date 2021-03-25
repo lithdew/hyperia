@@ -21,7 +21,6 @@ pub const Reactor = @import("reactor.zig").Reactor;
 pub const Socket = @import("socket.zig").Socket;
 pub const AsyncParker = @import("async_parker.zig").AsyncParker;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
-pub const AsyncAutoResetEvent = @import("async_event.zig").AsyncAutoResetEvent;
 pub const AsyncWaitGroup = @import("async_wait_group.zig").AsyncWaitGroup;
 pub const AsyncWaitGroupAllocator = @import("async_wait_group_allocator.zig").AsyncWaitGroupAllocator;
 

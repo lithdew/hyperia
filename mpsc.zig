@@ -1,4 +1,5 @@
 const std = @import("std");
+const hyperia = @import("hyperia.zig");
 
 const os = std.os;
 const mem = std.mem;
@@ -11,6 +12,51 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     .s390x => 256,
     else => 64,
 };
+
+pub fn AsyncSink(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const Node = struct {
+            runnable: zap.Pool.Runnable = .{ .runFn = run },
+            frame: anyframe,
+
+            cancelled: bool = false,
+            item: ?*Sink(T).Node = null,
+
+            pub fn run(runnable: *zap.Pool.Runnable) void {
+                const self = @fieldParentPtr(Node, "runnable", runnable);
+                resume self.frame;
+            }
+        };
+
+        sink: Sink(T) = .{},
+        consumer: ?*Node = null,
+
+        pub fn push(self: *Self, src: *Sink(T).Node) void {
+            self.sink.tryPush(src);
+
+            if (@atomicRmw(?*Node, &self.consumer, .Xchg, null, .Acquire)) |node| {
+                hyperia.pool.schedule(.{}, &node.runnable);
+            }
+        }
+
+        pub fn pop(self: *Self) *Sink(T).Node {
+            var node: Node = .{ .frame = @frame() };
+
+            while (node.item == null) {
+                suspend {
+                    if (self.sink.tryPop()) |item| {
+                        node.item = item;
+                        hyperia.pool.schedule(.{}, &node.runnable);
+                    } else {
+                        @atomicStore(?*Node, &self.consumer, &node, .Release);
+                    }
+                }
+            }
+        }
+    };
+}
 
 /// Unbounded MPSC queue supporting batching operations.
 pub fn Sink(comptime T: type) type {

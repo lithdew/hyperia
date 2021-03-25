@@ -3,7 +3,6 @@ const zap = @import("zap");
 const hyperia = @import("hyperia");
 const Reactor = hyperia.Reactor;
 const AsyncSocket = hyperia.AsyncSocket;
-const AsyncAutoResetEvent = hyperia.AsyncAutoResetEvent;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
 const os = std.os;
@@ -130,7 +129,7 @@ pub const Server = struct {
     }
 };
 
-pub fn runApp(reactor: Reactor, reactor_event: *AsyncAutoResetEvent) !void {
+pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
     defer {
         log.info("shutting down...", .{});
         @atomicStore(bool, &stopped, true, .Release);
@@ -181,7 +180,7 @@ pub fn main() !void {
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
 
-    var reactor_event = try AsyncAutoResetEvent.init(os.EFD_CLOEXEC, reactor);
+    var reactor_event = try Reactor.AutoResetEvent.init(os.EFD_CLOEXEC, reactor);
     defer reactor_event.deinit();
 
     try reactor.add(reactor_event.fd, &reactor_event.handle, .{});
