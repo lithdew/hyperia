@@ -14,66 +14,108 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     else => 64,
 };
 
-pub const AsyncAutoResetEvent = struct {
-    const Self = @This();
+pub fn AsyncAutoResetEvent(comptime T: type) type {
+    return struct {
+        const Self = @This();
 
-    const Node = struct {
-        runnable: zap.Pool.Runnable = .{ .runFn = run },
-        frame: anyframe,
+        const Node = struct {
+            runnable: zap.Pool.Runnable = .{ .runFn = run },
+            token: T = undefined,
+            frame: anyframe,
 
-        pub fn run(runnable: *zap.Pool.Runnable) void {
-            const self = @fieldParentPtr(Node, "runnable", runnable);
-            resume self.frame;
-        }
-    };
-
-    const EMPTY = 0;
-    const NOTIFIED = 1;
-
-    state: usize = EMPTY,
-
-    pub fn set(self: *Self) ?*zap.Pool.Runnable {
-        var state = @atomicLoad(usize, &self.state, .Monotonic);
-        while (state != NOTIFIED) {
-            if (state != EMPTY) {
-                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
-                    const node = @intToPtr(*Node, state);
-                    return &node.runnable;
-                };
-            } else {
-                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
-                    return null;
-                };
+            pub fn run(runnable: *zap.Pool.Runnable) void {
+                const self = @fieldParentPtr(Node, "runnable", runnable);
+                resume self.frame;
             }
-        }
-        return null;
-    }
+        };
 
-    pub fn wait(self: *Self) void {
-        var state = @atomicLoad(usize, &self.state, .Monotonic);
+        const EMPTY = 0;
+        const NOTIFIED = 1;
 
-        if (state != NOTIFIED) {
-            var node: Node = .{ .frame = @frame() };
-            suspend { // This CMPXCHG can only fail if state is NOTIFIED.
-                if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
-                    hyperia.pool.schedule(.{}, &node.runnable);
+        state: usize = EMPTY,
+
+        pub usingnamespace if (@sizeOf(T) == 0) struct {
+            pub fn set(self: *Self) ?*zap.Pool.Runnable {
+                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                while (state != NOTIFIED) {
+                    if (state != EMPTY) {
+                        state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
+                            const node = @intToPtr(*Node, state);
+                            return &node.runnable;
+                        };
+                    } else {
+                        state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
+                            return null;
+                        };
+                    }
+                }
+                return null;
+            }
+
+            pub fn wait(self: *Self) void {
+                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                defer @atomicStore(usize, &self.state, EMPTY, .Monotonic);
+
+                if (state != NOTIFIED) {
+                    var node: Node = .{ .frame = @frame() };
+                    suspend { // This CMPXCHG can only fail if state is NOTIFIED.
+                        if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
+                            hyperia.pool.schedule(.{}, &node.runnable);
+                        }
+                    }
                 }
             }
-        }
+        } else struct {
+            pub fn set(self: *Self, token: T) ?*zap.Pool.Runnable {
+                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                while (state != NOTIFIED) {
+                    if (state != EMPTY) {
+                        state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
+                            const node = @intToPtr(*Node, state);
+                            node.token = token;
+                            return &node.runnable;
+                        };
+                    } else {
+                        state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
+                            return null;
+                        };
+                    }
+                }
+                return null;
+            }
 
-        @atomicStore(usize, &self.state, EMPTY, .Monotonic);
-    }
-};
+            pub fn wait(self: *Self) T {
+                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                defer @atomicStore(usize, &self.state, EMPTY, .Monotonic);
+
+                if (state != NOTIFIED) {
+                    var node: Node = .{ .frame = @frame() };
+                    suspend { // This CMPXCHG can only fail if state is NOTIFIED.
+                        if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
+                            hyperia.pool.schedule(.{}, &node.runnable);
+                        }
+                    }
+                    return node.token;
+                }
+
+                return mem.zeroes(T);
+            }
+        };
+    };
+}
 
 pub fn AsyncSink(comptime T: type) type {
     return struct {
         const Self = @This();
 
+        const READY = 0;
+        const CANCELLED = 1;
+
         sink: Sink(T) = .{},
-        event: AsyncAutoResetEvent = .{},
+        event: AsyncAutoResetEvent(usize) = .{},
 
         pub fn cancel(self: *Self) void {
-            if (self.event.set()) |runnable| {
+            if (self.event.set(CANCELLED)) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -81,7 +123,7 @@ pub fn AsyncSink(comptime T: type) type {
         pub fn push(self: *Self, src: *Sink(T).Node) void {
             self.sink.tryPush(src);
 
-            if (self.event.set()) |runnable| {
+            if (self.event.set(READY)) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -89,7 +131,7 @@ pub fn AsyncSink(comptime T: type) type {
         pub fn pushBatch(self: *Self, first: *Sink(T).Node, last: *Sink(T).Node) void {
             self.sink.tryPushBatch(first, last);
 
-            if (self.event.set()) |runnable| {
+            if (self.event.set(READY)) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -99,8 +141,14 @@ pub fn AsyncSink(comptime T: type) type {
         }
 
         pub fn pop(self: *Self) ?*Sink(T).Node {
-            self.event.wait();
-            return self.tryPop();
+            while (true) {
+                return self.tryPop() orelse {
+                    if (self.event.wait() == CANCELLED) {
+                        return null;
+                    }
+                    continue;
+                };
+            }
         }
 
         pub fn tryPopBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
@@ -108,8 +156,16 @@ pub fn AsyncSink(comptime T: type) type {
         }
 
         pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
-            self.event.wait();
-            return self.tryPopBatch(b_first, b_last);
+            while (true) {
+                const num_items = self.tryPopBatch(b_first, b_last);
+                if (num_items == 0) {
+                    if (self.event.wait() == CANCELLED) {
+                        return 0;
+                    }
+                    continue;
+                }
+                return num_items;
+            }
         }
     };
 }
@@ -209,7 +265,8 @@ pub fn Sink(comptime T: type) type {
 test {
     testing.refAllDecls(Sink(u64));
     testing.refAllDecls(AsyncSink(u64));
-    testing.refAllDecls(AsyncAutoResetEvent);
+    testing.refAllDecls(AsyncAutoResetEvent(void));
+    testing.refAllDecls(AsyncAutoResetEvent(usize));
 }
 
 test "sink: push and pop 60,000 u64s with 15 producers" {

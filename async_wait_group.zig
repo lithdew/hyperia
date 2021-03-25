@@ -19,7 +19,7 @@ pub const AsyncWaitGroup = struct {
     };
 
     state: usize = 0,
-    event: mpsc.AsyncAutoResetEvent = .{},
+    event: mpsc.AsyncAutoResetEvent(void) = .{},
 
     pub fn add(self: *Self, delta: usize) void {
         if (delta == 0) return;

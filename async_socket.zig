@@ -3,18 +3,23 @@ const zap = @import("zap");
 const hyperia = @import("hyperia.zig");
 const Socket = @import("socket.zig").Socket;
 const Reactor = @import("reactor.zig").Reactor;
-const AsyncParker = @import("async_parker.zig").AsyncParker;
 
 const os = std.os;
 const net = std.net;
+const mpsc = hyperia.mpsc;
 const testing = std.testing;
 
 pub const AsyncSocket = struct {
+    pub const Error = error{Cancelled};
+
     const Self = @This();
 
+    const READY = 0;
+    const CANCELLED = 1;
+
     socket: Socket,
-    readable: AsyncParker = .{},
-    writable: AsyncParker = .{},
+    readable: mpsc.AsyncAutoResetEvent(usize) = .{},
+    writable: mpsc.AsyncAutoResetEvent(usize) = .{},
     handle: Reactor.Handle = .{ .onEventFn = onEvent },
 
     pub fn init(domain: u32, socket_type: u32, flags: u32) !Self {
@@ -97,11 +102,13 @@ pub const AsyncSocket = struct {
         return self.socket.accept(flags);
     }
 
-    pub fn read(self: *Self, buf: []u8) (os.ReadError || AsyncParker.Error)!usize {
+    pub fn read(self: *Self, buf: []u8) (os.ReadError || Error)!usize {
         while (true) {
             const num_bytes = self.tryRead(buf) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.readable.wait();
+                    if (self.readable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                     continue;
                 },
                 else => return err,
@@ -111,11 +118,13 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn recv(self: *Self, buf: []u8, flags: u32) (os.RecvFromError || AsyncParker.Error)!usize {
+    pub fn recv(self: *Self, buf: []u8, flags: u32) (os.RecvFromError || Error)!usize {
         while (true) {
             const num_bytes = self.tryRecv(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.readable.wait();
+                    if (self.readable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                     continue;
                 },
                 else => return err,
@@ -125,11 +134,13 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn write(self: *Self, buf: []const u8) (os.WriteError || AsyncParker.Error)!usize {
+    pub fn write(self: *Self, buf: []const u8) (os.WriteError || Error)!usize {
         while (true) {
             const num_bytes = self.tryWrite(buf) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.writable.wait();
+                    if (self.writable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                     continue;
                 },
                 else => return err,
@@ -139,11 +150,13 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn send(self: *Self, buf: []const u8, flags: u32) (os.SendError || AsyncParker.Error)!usize {
+    pub fn send(self: *Self, buf: []const u8, flags: u32) (os.SendError || Error)!usize {
         while (true) {
             const num_bytes = self.trySend(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.writable.wait();
+                    if (self.writable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                     continue;
                 },
                 else => return err,
@@ -153,22 +166,26 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn connect(self: *Self, address: net.Address) (os.ConnectError || AsyncParker.Error)!void {
+    pub fn connect(self: *Self, address: net.Address) (os.ConnectError || Error)!void {
         while (true) {
             return self.tryConnect(address) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.writable.wait();
+                    if (self.writable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                 },
                 else => return err,
             };
         }
     }
 
-    pub fn accept(self: *Self, flags: u32) (os.AcceptError || AsyncParker.Error)!Socket.Connection {
+    pub fn accept(self: *Self, flags: u32) (os.AcceptError || Error)!Socket.Connection {
         while (true) {
             const connection = self.tryAccept(flags) catch |err| switch (err) {
                 error.WouldBlock => {
-                    try self.readable.wait();
+                    if (self.readable.wait() == CANCELLED) {
+                        return error.Cancelled;
+                    }
                     continue;
                 },
                 else => return err,
@@ -181,19 +198,19 @@ pub const AsyncSocket = struct {
     pub fn cancel(self: *Self, how: enum { read, write, connect, accept, all }) void {
         switch (how) {
             .read, .accept => {
-                if (self.readable.cancel()) |runnable| {
+                if (self.readable.set(CANCELLED)) |runnable| {
                     hyperia.pool.schedule(.{}, runnable);
                 }
             },
             .write, .connect => {
-                if (self.writable.cancel()) |runnable| {
+                if (self.writable.set(CANCELLED)) |runnable| {
                     hyperia.pool.schedule(.{}, runnable);
                 }
             },
             .all => {
                 var batch: zap.Pool.Batch = .{};
-                if (self.writable.cancel()) |runnable| batch.push(runnable);
-                if (self.readable.cancel()) |runnable| batch.push(runnable);
+                if (self.writable.set(CANCELLED)) |runnable| batch.push(runnable);
+                if (self.readable.set(CANCELLED)) |runnable| batch.push(runnable);
                 hyperia.pool.schedule(.{}, batch);
             },
         }
@@ -203,20 +220,20 @@ pub const AsyncSocket = struct {
         const self = @fieldParentPtr(AsyncSocket, "handle", handle);
 
         if (event.is_readable) {
-            if (self.readable.notify()) |runnable| {
+            if (self.readable.set(READY)) |runnable| {
                 batch.push(runnable);
             }
         }
 
         if (event.is_writable) {
-            if (self.writable.notify()) |runnable| {
+            if (self.writable.set(READY)) |runnable| {
                 batch.push(runnable);
             }
         }
 
         if (event.is_hup) {
-            if (self.readable.close()) |runnable| batch.push(runnable);
-            if (self.writable.close()) |runnable| batch.push(runnable);
+            if (self.readable.set(READY)) |runnable| batch.push(runnable);
+            if (self.writable.set(READY)) |runnable| batch.push(runnable);
             // TODO(kenta): deinitialize resources for connection
         }
     }
