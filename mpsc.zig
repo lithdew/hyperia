@@ -20,7 +20,6 @@ pub const AsyncAutoResetEvent = struct {
     const Node = struct {
         runnable: zap.Pool.Runnable = .{ .runFn = run },
         frame: anyframe,
-        cancelled: bool = false,
 
         pub fn run(runnable: *zap.Pool.Runnable) void {
             const self = @fieldParentPtr(Node, "runnable", runnable);
@@ -30,31 +29,14 @@ pub const AsyncAutoResetEvent = struct {
 
     const EMPTY = 0;
     const NOTIFIED = 1;
-    const CLOSED = 2;
 
     state: usize = EMPTY,
 
-    pub fn close(self: *Self) ?*zap.Pool.Runnable {
-        switch (@atomicRmw(usize, &self.state, .Xchg, CLOSED, .AcqRel)) {
-            EMPTY, NOTIFIED, CLOSED => return null,
-            else => |state| {
-                const node = @intToPtr(*Node, state);
-                node.cancelled = true;
-                return &node.runnable;
-            },
-        }
-    }
-
     pub fn set(self: *Self) ?*zap.Pool.Runnable {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
-        while (true) {
-            const new_state: usize = switch (state) {
-                NOTIFIED, CLOSED => return null,
-                else => NOTIFIED,
-            };
-
+        while (state != NOTIFIED) {
             if (state != EMPTY) {
-                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
+                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
                     if (state != EMPTY) {
                         const node = @intToPtr(*Node, state);
                         return &node.runnable;
@@ -62,7 +44,7 @@ pub const AsyncAutoResetEvent = struct {
                     return null;
                 };
             } else {
-                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Monotonic, .Monotonic) orelse {
+                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
                     if (state != EMPTY) {
                         const node = @intToPtr(*Node, state);
                         return &node.runnable;
@@ -71,11 +53,11 @@ pub const AsyncAutoResetEvent = struct {
                 };
             }
         }
+        return null;
     }
 
-    pub fn wait(self: *Self) !void {
+    pub fn wait(self: *Self) void {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
-        if (state == CLOSED) return error.Cancelled;
 
         if (state != NOTIFIED) {
             var node: Node = .{ .frame = @frame() };
@@ -84,7 +66,6 @@ pub const AsyncAutoResetEvent = struct {
                     hyperia.pool.schedule(.{}, &node.runnable);
                 }
             }
-            if (node.cancelled) return error.Cancelled;
         }
 
         @atomicStore(usize, &self.state, EMPTY, .Monotonic);
@@ -98,8 +79,8 @@ pub fn AsyncSink(comptime T: type) type {
         sink: Sink(T) = .{},
         event: AsyncAutoResetEvent = .{},
 
-        pub fn close(self: *Self) void {
-            if (self.event.close()) |runnable| {
+        pub fn cancel(self: *Self) void {
+            if (self.event.set()) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -124,28 +105,29 @@ pub fn AsyncSink(comptime T: type) type {
             return self.sink.tryPop();
         }
 
-        pub fn pop(self: *Self) !*Sink(T).Node {
-            while (true) {
-                return self.sink.tryPop() orelse {
-                    try self.event.wait();
-                    continue;
-                };
+        pub fn pop(self: *Self) ?*Sink(T).Node {
+            if (self.sink.tryPop()) |node| {
+                return node;
             }
+
+            self.event.wait();
+
+            return self.sink.tryPop();
         }
 
         pub fn tryPopBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
             return self.sink.tryPopBatch(b_first, b_last);
         }
 
-        pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) !usize {
-            while (true) {
-                const num_items = self.tryPopBatch(b_first, b_last);
-                if (num_items == 0) {
-                    try self.event.wait();
-                    continue;
-                }
+        pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
+            const num_items = self.tryPopBatch(b_first, b_last);
+            if (num_items > 0) {
                 return num_items;
             }
+
+            self.event.wait();
+
+            return self.tryPopBatch(b_first, b_last);
         }
     };
 }

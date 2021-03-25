@@ -46,7 +46,7 @@ pub const Server = struct {
             const Cases = struct {
                 write: struct {
                     run: Case(Connection.writeLoop),
-                    cancel: Case(mpsc.AsyncSink([]const u8).close),
+                    cancel: Case(mpsc.AsyncSink([]const u8).cancel),
                 },
                 read: struct {
                     run: Case(Connection.readLoop),
@@ -58,7 +58,7 @@ pub const Server = struct {
                 Cases{
                     .write = .{
                         .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(mpsc.AsyncSink([]const u8).close, .{&self.queue}),
+                        .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
                     },
                     .read = .{
                         .run = call(Connection.readLoop, .{self}),
@@ -92,7 +92,8 @@ pub const Server = struct {
             var last: *mpsc.Sink([]const u8).Node = undefined;
 
             while (true) {
-                const num_items = try self.queue.popBatch(&first, &last);
+                const num_items = self.queue.popBatch(&first, &last);
+                if (num_items == 0) return;
 
                 var i: usize = 0;
                 errdefer while (i < num_items) : (i += 1) {
