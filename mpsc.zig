@@ -45,10 +45,6 @@ pub const AsyncAutoResetEvent = struct {
                 };
             } else {
                 state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
-                    if (state != EMPTY) {
-                        const node = @intToPtr(*Node, state);
-                        return &node.runnable;
-                    }
                     return null;
                 };
             }
@@ -106,12 +102,7 @@ pub fn AsyncSink(comptime T: type) type {
         }
 
         pub fn pop(self: *Self) ?*Sink(T).Node {
-            if (self.sink.tryPop()) |node| {
-                return node;
-            }
-
             self.event.wait();
-
             return self.sink.tryPop();
         }
 
@@ -120,13 +111,7 @@ pub fn AsyncSink(comptime T: type) type {
         }
 
         pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
-            const num_items = self.tryPopBatch(b_first, b_last);
-            if (num_items > 0) {
-                return num_items;
-            }
-
             self.event.wait();
-
             return self.tryPopBatch(b_first, b_last);
         }
     };
