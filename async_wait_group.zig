@@ -19,7 +19,7 @@ pub const AsyncWaitGroup = struct {
     };
 
     state: usize = 0,
-    event: mpsc.AsyncParker = .{},
+    event: mpsc.AsyncAutoResetEvent = .{},
 
     pub fn add(self: *Self, delta: usize) void {
         if (delta == 0) return;
@@ -37,8 +37,9 @@ pub const AsyncWaitGroup = struct {
     }
 
     pub fn wait(self: *Self) void {
-        if (@atomicLoad(usize, &self.state, .Monotonic) == 0) return;
-        self.event.wait();
+        while (@atomicLoad(usize, &self.state, .Monotonic) != 0) {
+            self.event.wait();
+        }
     }
 };
 
