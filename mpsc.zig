@@ -1,4 +1,5 @@
 const std = @import("std");
+const zap = @import("zap");
 const hyperia = @import("hyperia.zig");
 
 const os = std.os;
@@ -13,46 +14,83 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     else => 64,
 };
 
+pub const AsyncAutoResetEvent = struct {
+    const Self = @This();
+
+    const Node = struct {
+        runnable: zap.Pool.Runnable = .{ .runFn = run },
+        frame: anyframe,
+
+        cancelled: bool = false,
+
+        pub fn run(runnable: *zap.Pool.Runnable) void {
+            const self = @fieldParentPtr(Node, "runnable", runnable);
+            resume self.frame;
+        }
+    };
+
+    const EMPTY = 0;
+    const NOTIFIED = 1;
+
+    state: usize = EMPTY,
+
+    pub fn set(self: *Self) void {
+        var state = @atomicLoad(usize, &self.state, .Monotonic);
+        while (state != NOTIFIED) {
+            if (state != EMPTY) {
+                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
+                    if (state != EMPTY) {
+                        const node = @intToPtr(*Node, state);
+                        hyperia.pool.schedule(.{}, &node.runnable);
+                    }
+                    return;
+                };
+            } else {
+                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
+                    if (state != EMPTY) {
+                        const node = @intToPtr(*Node, state);
+                        hyperia.pool.schedule(.{}, &node.runnable);
+                    }
+                    return;
+                };
+            }
+        }
+    }
+
+    pub fn wait(self: *Self) void {
+        var state = @atomicLoad(usize, &self.state, .Monotonic);
+        if (state != NOTIFIED) {
+            var node: Node = .{ .frame = @frame() };
+            suspend {
+                if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
+                    // This CMPXCHG can only fail if state is NOTIFIED.
+                    hyperia.pool.schedule(.{}, &node.runnable);
+                }
+            }
+        }
+
+        @atomicStore(usize, &self.state, EMPTY, .Monotonic);
+    }
+};
+
 pub fn AsyncSink(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        const Node = struct {
-            runnable: zap.Pool.Runnable = .{ .runFn = run },
-            frame: anyframe,
-
-            cancelled: bool = false,
-            item: ?*Sink(T).Node = null,
-
-            pub fn run(runnable: *zap.Pool.Runnable) void {
-                const self = @fieldParentPtr(Node, "runnable", runnable);
-                resume self.frame;
-            }
-        };
-
         sink: Sink(T) = .{},
-        consumer: ?*Node = null,
+        event: AsyncAutoResetEvent = .{},
 
         pub fn push(self: *Self, src: *Sink(T).Node) void {
             self.sink.tryPush(src);
-
-            if (@atomicRmw(?*Node, &self.consumer, .Xchg, null, .Acquire)) |node| {
-                hyperia.pool.schedule(.{}, &node.runnable);
-            }
+            self.event.set();
         }
 
         pub fn pop(self: *Self) *Sink(T).Node {
-            var node: Node = .{ .frame = @frame() };
-
-            while (node.item == null) {
-                suspend {
-                    if (self.sink.tryPop()) |item| {
-                        node.item = item;
-                        hyperia.pool.schedule(.{}, &node.runnable);
-                    } else {
-                        @atomicStore(?*Node, &self.consumer, &node, .Release);
-                    }
-                }
+            while (true) {
+                return self.sink.tryPop() orelse {
+                    self.event.wait();
+                    continue;
+                };
             }
         }
     };
@@ -152,6 +190,8 @@ pub fn Sink(comptime T: type) type {
 
 test {
     testing.refAllDecls(Sink(u64));
+    testing.refAllDecls(AsyncSink(u64));
+    testing.refAllDecls(AsyncAutoResetEvent);
 }
 
 test "sink: push and pop 60,000 u64s with 15 producers" {
