@@ -9,8 +9,8 @@ pub fn ObjectPool(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
 
-        queue: mpmc.Queue(*T, capacity),
-        head: [*]T,
+        queue: mpmc.Queue(*T, capacity) align(mpmc.cache_line_length),
+        head: [*]T align(mpmc.cache_line_length),
 
         pub fn init(allocator: *mem.Allocator) !Self {
             var queue = try mpmc.Queue(*T, capacity).init(allocator);
