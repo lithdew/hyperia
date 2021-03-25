@@ -20,7 +20,6 @@ pub const AsyncAutoResetEvent = struct {
     const Node = struct {
         runnable: zap.Pool.Runnable = .{ .runFn = run },
         frame: anyframe,
-
         cancelled: bool = false,
 
         pub fn run(runnable: *zap.Pool.Runnable) void {
@@ -31,42 +30,61 @@ pub const AsyncAutoResetEvent = struct {
 
     const EMPTY = 0;
     const NOTIFIED = 1;
+    const CLOSED = 2;
 
     state: usize = EMPTY,
 
-    pub fn set(self: *Self) void {
+    pub fn close(self: *Self) ?*zap.Pool.Runnable {
+        switch (@atomicRmw(usize, &self.state, .Xchg, CLOSED, .AcqRel)) {
+            EMPTY, NOTIFIED, CLOSED => return null,
+            else => |state| {
+                const node = @intToPtr(*Node, state);
+                node.cancelled = true;
+                return &node.runnable;
+            },
+        }
+    }
+
+    pub fn set(self: *Self) ?*zap.Pool.Runnable {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
-        while (state != NOTIFIED) {
+        while (true) {
+            const new_state: usize = switch (state) {
+                NOTIFIED, CLOSED => return null,
+                else => NOTIFIED,
+            };
+
             if (state != EMPTY) {
-                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
+                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
                     if (state != EMPTY) {
                         const node = @intToPtr(*Node, state);
-                        hyperia.pool.schedule(.{}, &node.runnable);
+                        return &node.runnable;
                     }
-                    return;
+                    return null;
                 };
             } else {
-                state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
+                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Monotonic, .Monotonic) orelse {
                     if (state != EMPTY) {
                         const node = @intToPtr(*Node, state);
-                        hyperia.pool.schedule(.{}, &node.runnable);
+                        return &node.runnable;
                     }
-                    return;
+                    return null;
                 };
             }
         }
     }
 
-    pub fn wait(self: *Self) void {
+    pub fn wait(self: *Self) !void {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
+        if (state == CLOSED) return error.Cancelled;
+
         if (state != NOTIFIED) {
             var node: Node = .{ .frame = @frame() };
-            suspend {
+            suspend { // This CMPXCHG can only fail if state is NOTIFIED.
                 if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
-                    // This CMPXCHG can only fail if state is NOTIFIED.
                     hyperia.pool.schedule(.{}, &node.runnable);
                 }
             }
+            if (node.cancelled) return error.Cancelled;
         }
 
         @atomicStore(usize, &self.state, EMPTY, .Monotonic);
@@ -80,17 +98,45 @@ pub fn AsyncSink(comptime T: type) type {
         sink: Sink(T) = .{},
         event: AsyncAutoResetEvent = .{},
 
-        pub fn push(self: *Self, src: *Sink(T).Node) void {
-            self.sink.tryPush(src);
-            self.event.set();
+        pub fn close(self: *Self) void {
+            if (self.event.close()) |runnable| {
+                hyperia.pool.schedule(.{}, runnable);
+            }
         }
 
-        pub fn pop(self: *Self) *Sink(T).Node {
+        pub fn push(self: *Self, src: *Sink(T).Node) void {
+            self.sink.tryPush(src);
+
+            if (self.event.set()) |runnable| {
+                hyperia.pool.schedule(.{}, runnable);
+            }
+        }
+
+        pub fn pushBatch(self: *Self, first: *Sink(T).Node, last: *Sink(T).Node) void {
+            self.sink.tryPushBatch(first, last);
+
+            if (self.event.set()) |runnable| {
+                hyperia.pool.schedule(.{}, runnable);
+            }
+        }
+
+        pub fn pop(self: *Self) !*Sink(T).Node {
             while (true) {
                 return self.sink.tryPop() orelse {
-                    self.event.wait();
+                    try self.event.wait();
                     continue;
                 };
+            }
+        }
+
+        pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) !usize {
+            while (true) {
+                const num_items = self.sink.tryPopBatch(b_first, b_last);
+                if (num_items == 0) {
+                    try self.event.wait();
+                    continue;
+                }
+                return num_items;
             }
         }
     };
