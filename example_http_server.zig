@@ -19,7 +19,7 @@ pub const log_level = .debug;
 
 var stopped: bool = false;
 
-var pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 1024) = undefined;
+var pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undefined;
 
 pub const Server = struct {
     pub const Connection = struct {
@@ -281,7 +281,7 @@ pub fn main() !void {
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
 
-    pool = try hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 1024).init(hyperia.allocator);
+    pool = try hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096).init(hyperia.allocator);
     defer pool.deinit(hyperia.allocator);
 
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
