@@ -9,7 +9,7 @@ const testing = std.testing;
 const print = std.debug.print;
 
 pub const Socket = struct {
-    fd: os.fd_t,
+    fd: os.socket_t,
 
     pub fn init(domain: u32, socket_type: u32, protocol: u32) !Socket {
         return Socket{ .fd = try os.socket(domain, socket_type, protocol) };
@@ -165,8 +165,16 @@ pub const Socket = struct {
         return try os.read(self.fd, buf);
     }
 
+    pub fn recv(self: Socket, buf: []u8, flags: u32) !usize {
+        return try os.recv(self.fd, buf, flags);
+    }
+
     pub fn write(self: Socket, buf: []const u8) !usize {
         return try os.write(self.fd, buf);
+    }
+
+    pub fn send(self: Socket, buf: []const u8, flags: u32) !usize {
+        return try os.send(self.fd, buf, flags);
     }
 };
 

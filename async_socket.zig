@@ -77,8 +77,16 @@ pub const AsyncSocket = struct {
         return self.socket.read(buf);
     }
 
+    pub fn tryRecv(self: *Self, buf: []u8, flags: u32) os.RecvFromError!usize {
+        return self.socket.recv(buf, flags);
+    }
+
     pub fn tryWrite(self: *Self, buf: []const u8) os.WriteError!usize {
         return self.socket.write(buf);
+    }
+
+    pub fn trySend(self: *Self, buf: []const u8, flags: u32) os.SendError!usize {
+        return self.socket.send(buf, flags);
     }
 
     pub fn tryConnect(self: *Self, address: net.Address) os.ConnectError!void {
@@ -103,9 +111,37 @@ pub const AsyncSocket = struct {
         }
     }
 
+    pub fn recv(self: *Self, buf: []u8, flags: u32) (os.RecvFromError || AsyncParker.Error)!usize {
+        while (true) {
+            const num_bytes = self.tryRecv(buf, flags) catch |err| switch (err) {
+                error.WouldBlock => {
+                    try self.readable.wait();
+                    continue;
+                },
+                else => return err,
+            };
+
+            return num_bytes;
+        }
+    }
+
     pub fn write(self: *Self, buf: []const u8) (os.WriteError || AsyncParker.Error)!usize {
         while (true) {
             const num_bytes = self.tryWrite(buf) catch |err| switch (err) {
+                error.WouldBlock => {
+                    try self.writable.wait();
+                    continue;
+                },
+                else => return err,
+            };
+
+            return num_bytes;
+        }
+    }
+
+    pub fn send(self: *Self, buf: []const u8, flags: u32) (os.SendError || AsyncParker.Error)!usize {
+        while (true) {
+            const num_bytes = self.trySend(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {
                     try self.writable.wait();
                     continue;

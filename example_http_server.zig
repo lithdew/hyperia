@@ -10,6 +10,7 @@ const os = std.os;
 const net = std.net;
 const mem = std.mem;
 const math = std.math;
+const mpsc = hyperia.mpsc;
 const log = std.log.scoped(.server);
 
 usingnamespace hyperia.select;
@@ -18,12 +19,16 @@ pub const log_level = .debug;
 
 var stopped: bool = false;
 
+var pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 1024) = undefined;
+var pool_lock: std.Thread.Mutex = .{};
+
 pub const Server = struct {
     pub const Connection = struct {
         server: *Server,
         socket: AsyncSocket,
         address: net.Address,
         frame: @Frame(Connection.start),
+        queue: mpsc.AsyncSink([]const u8) = .{},
 
         pub fn start(self: *Connection) !void {
             defer {
@@ -31,12 +36,93 @@ pub const Server = struct {
 
                 if (self.server.deregister(self.address)) {
                     suspend {
+                        self.cleanup();
                         self.socket.deinit();
                         self.server.wga.allocator.destroy(self);
                     }
                 }
             }
 
+            const Cases = struct {
+                write: struct {
+                    run: Case(Connection.writeLoop),
+                    cancel: Case(mpsc.AsyncSink([]const u8).close),
+                },
+                read: struct {
+                    run: Case(Connection.readLoop),
+                    cancel: Case(AsyncSocket.cancel),
+                },
+            };
+
+            switch (select(
+                Cases{
+                    .write = .{
+                        .run = call(Connection.writeLoop, .{self}),
+                        .cancel = call(mpsc.AsyncSink([]const u8).close, .{&self.queue}),
+                    },
+                    .read = .{
+                        .run = call(Connection.readLoop, .{self}),
+                        .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
+                    },
+                },
+            )) {
+                .write => |result| return result,
+                .read => |result| return result,
+            }
+        }
+
+        pub fn cleanup(self: *Connection) void {
+            var first: *mpsc.Sink([]const u8).Node = undefined;
+            var last: *mpsc.Sink([]const u8).Node = undefined;
+
+            var num_items = self.queue.tryPopBatch(&first, &last);
+            while (num_items > 0) : (num_items -= 1) {
+                const next = first.next;
+                {
+                    const held = pool_lock.acquire();
+                    defer held.release();
+                    pool.release(hyperia.allocator, first);
+                }
+                first = next orelse continue;
+            }
+        }
+
+        pub fn writeLoop(self: *Connection) !void {
+            var first: *mpsc.Sink([]const u8).Node = undefined;
+            var last: *mpsc.Sink([]const u8).Node = undefined;
+
+            while (true) {
+                const num_items = try self.queue.popBatch(&first, &last);
+
+                var i: usize = 0;
+                errdefer while (i < num_items) : (i += 1) {
+                    const next = first.next;
+                    {
+                        const held = pool_lock.acquire();
+                        defer held.release();
+                        pool.release(hyperia.allocator, first);
+                    }
+                    first = next orelse continue;
+                };
+
+                while (i < num_items) : (i += 1) {
+                    var index: usize = 0;
+                    while (index < first.value.len) {
+                        index += try self.socket.send(first.value[index..], os.MSG_NOSIGNAL);
+                    }
+
+                    const next = first.next;
+                    {
+                        const held = pool_lock.acquire();
+                        defer held.release();
+                        pool.release(hyperia.allocator, first);
+                    }
+                    first = next orelse continue;
+                }
+            }
+        }
+
+        pub fn readLoop(self: *Connection) !void {
             var buf = std.ArrayList(u8).init(hyperia.allocator);
             defer buf.deinit();
 
@@ -50,7 +136,7 @@ pub const Server = struct {
                 }
                 buf.items.len = buf.capacity;
 
-                const num_bytes = try self.socket.read(buf.items[old_len..]);
+                const num_bytes = try self.socket.recv(buf.items[old_len..], os.MSG_NOSIGNAL);
                 if (num_bytes == 0) return;
 
                 buf.items.len = old_len + num_bytes;
@@ -69,10 +155,13 @@ pub const Server = struct {
 
                 const RES = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 12\r\n\r\nHello world!";
 
-                var index: usize = 0;
-                while (index < RES.len) {
-                    index += try self.socket.write(RES[index..]);
-                }
+                const node = blk: {
+                    const held = pool_lock.acquire();
+                    defer held.release();
+                    break :blk try pool.acquire(hyperia.allocator);
+                };
+                node.* = .{ .value = RES };
+                self.queue.push(node);
 
                 buf.items.len = 0;
             }
@@ -98,6 +187,7 @@ pub const Server = struct {
             defer held.release();
 
             for (self.connections.items()) |entry| {
+                log.info("closing {}", .{entry.value.address});
                 entry.value.socket.shutdown(.both) catch {};
             }
         }
@@ -138,6 +228,7 @@ pub const Server = struct {
             connection.server = self;
             connection.socket = AsyncSocket.from(conn.socket);
             connection.address = conn.address;
+            connection.queue = .{};
 
             try reactor.add(conn.socket.fd, &connection.socket.handle, .{ .readable = true, .writable = true });
 
@@ -208,6 +299,9 @@ pub fn main() !void {
 
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
+
+    pool = try hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 1024).init(hyperia.allocator);
+    defer pool.deinit(hyperia.allocator);
 
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();

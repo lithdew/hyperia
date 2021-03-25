@@ -120,6 +120,10 @@ pub fn AsyncSink(comptime T: type) type {
             }
         }
 
+        pub fn tryPop(self: *Self) ?*Sink(T).Node {
+            return self.sink.tryPop();
+        }
+
         pub fn pop(self: *Self) !*Sink(T).Node {
             while (true) {
                 return self.sink.tryPop() orelse {
@@ -129,9 +133,13 @@ pub fn AsyncSink(comptime T: type) type {
             }
         }
 
+        pub fn tryPopBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
+            return self.sink.tryPopBatch(b_first, b_last);
+        }
+
         pub fn popBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) !usize {
             while (true) {
-                const num_items = self.sink.tryPopBatch(b_first, b_last);
+                const num_items = self.tryPopBatch(b_first, b_last);
                 if (num_items == 0) {
                     try self.event.wait();
                     continue;
