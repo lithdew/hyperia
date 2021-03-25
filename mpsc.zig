@@ -14,6 +14,42 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     else => 64,
 };
 
+/// An async MPSC coroutine parker. Unlike Event's, coroutines are only released
+/// when a subsequent (rather than prior) call to set() is made. 
+pub const AsyncParker = struct {
+    const Self = @This();
+
+    const Node = struct {
+        runnable: zap.Pool.Runnable = .{ .runFn = run },
+        frame: anyframe,
+
+        pub fn run(runnable: *zap.Pool.Runnable) void {
+            const self = @fieldParentPtr(Node, "runnable", runnable);
+            resume self.frame;
+        }
+    };
+
+    const EMPTY = 0;
+
+    state: usize = EMPTY,
+
+    pub fn set(self: *Self) ?*zap.Pool.Runnable {
+        var state = @atomicLoad(usize, &self.state, .Monotonic);
+        while (state != EMPTY) {
+            state = @cmpxchgWeak(usize, &self.state, state, EMPTY, .Acquire, .Monotonic) orelse {
+                const node = @intToPtr(*Node, state);
+                return &node.runnable;
+            };
+        }
+        return null;
+    }
+
+    pub fn wait(self: *Self) void {
+        var node: Node = .{ .frame = @frame() };
+        suspend @atomicStore(usize, &self.state, @ptrToInt(&node), .Release);
+    }
+};
+
 pub const AsyncAutoResetEvent = struct {
     const Self = @This();
 
