@@ -20,7 +20,6 @@ pub const log_level = .debug;
 var stopped: bool = false;
 
 var pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 1024) = undefined;
-var pool_lock: std.Thread.Mutex = .{};
 
 pub const Server = struct {
     pub const Connection = struct {
@@ -78,11 +77,7 @@ pub const Server = struct {
             var num_items = self.queue.tryPopBatch(&first, &last);
             while (num_items > 0) : (num_items -= 1) {
                 const next = first.next;
-                {
-                    const held = pool_lock.acquire();
-                    defer held.release();
-                    pool.release(hyperia.allocator, first);
-                }
+                pool.release(hyperia.allocator, first);
                 first = next orelse continue;
             }
         }
@@ -98,11 +93,7 @@ pub const Server = struct {
                 var i: usize = 0;
                 errdefer while (i < num_items) : (i += 1) {
                     const next = first.next;
-                    {
-                        const held = pool_lock.acquire();
-                        defer held.release();
-                        pool.release(hyperia.allocator, first);
-                    }
+                    pool.release(hyperia.allocator, first);
                     first = next orelse continue;
                 };
 
@@ -113,11 +104,7 @@ pub const Server = struct {
                     }
 
                     const next = first.next;
-                    {
-                        const held = pool_lock.acquire();
-                        defer held.release();
-                        pool.release(hyperia.allocator, first);
-                    }
+                    pool.release(hyperia.allocator, first);
                     first = next orelse continue;
                 }
             }
@@ -153,11 +140,7 @@ pub const Server = struct {
 
                 const RES = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 12\r\n\r\nHello world!";
 
-                const node = blk: {
-                    const held = pool_lock.acquire();
-                    defer held.release();
-                    break :blk try pool.acquire(hyperia.allocator);
-                };
+                const node = try pool.acquire(hyperia.allocator);
                 node.* = .{ .value = RES };
                 self.queue.push(node);
 

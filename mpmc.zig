@@ -49,7 +49,7 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
                 entry = &self.entries[pos & (capacity - 1)];
 
                 const seq = @atomicLoad(usize, &entry.sequence, .Acquire);
-                const diff = seq -% pos;
+                const diff = @intCast(isize, seq) -% @intCast(isize, pos);
                 if (diff == 0) {
                     pos = @cmpxchgWeak(usize, &self.enqueue_pos, pos, pos +% 1, .Monotonic, .Monotonic) orelse {
                         break;
@@ -72,7 +72,7 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
                 entry = &self.entries[pos & (capacity - 1)];
 
                 const seq = @atomicLoad(usize, &entry.sequence, .Acquire);
-                const diff = seq -% (pos +% 1);
+                const diff = @intCast(isize, seq) -% @intCast(isize, pos +% 1);
                 if (diff == 0) {
                     pos = @cmpxchgWeak(usize, &self.dequeue_pos, pos, pos +% 1, .Monotonic, .Monotonic) orelse {
                         break;
@@ -83,8 +83,9 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
                     pos = @atomicLoad(usize, &self.dequeue_pos, .Monotonic);
                 }
             }
-            defer @atomicStore(usize, &entry.sequence, pos +% (capacity - 1) +% 1, .Release);
-            return entry.item;
+            const item = entry.item;
+            @atomicStore(usize, &entry.sequence, pos +% (capacity - 1) +% 1, .Release);
+            return item;
         }
     };
 }

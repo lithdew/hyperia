@@ -1,65 +1,51 @@
 const std = @import("std");
+const hyperia = @import("hyperia.zig");
 
 const mem = std.mem;
+const mpmc = hyperia.mpmc;
 const testing = std.testing;
 
 pub fn ObjectPool(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
 
-        pub const Object = struct {
-            next: ?*Object = null,
-            item: T,
-        };
-
-        head: ?*Object = null,
-        len: usize = 0,
+        queue: mpmc.Queue(*T, capacity),
+        head: [*]T,
 
         pub fn init(allocator: *mem.Allocator) !Self {
-            var self: Self = .{};
-            errdefer self.deinit(allocator);
+            var queue = try mpmc.Queue(*T, capacity).init(allocator);
+            errdefer queue.deinit(allocator);
 
-            var i: usize = 0;
-            while (i < capacity) : (i += 1) {
-                const object = try allocator.create(Object);
-                object.* = .{ .next = self.head, .item = undefined };
-                self.head = object;
-            }
+            const items = try allocator.create([capacity]T);
+            errdefer allocator.destroy(items);
 
-            self.len = capacity;
+            for (items) |*item| if (!queue.tryPush(item)) unreachable;
 
-            return self;
+            return Self{ .queue = queue, .head = items };
         }
 
-        pub fn deinit(self: Self, allocator: *mem.Allocator) void {
-            var it = self.head;
-            while (it) |object| {
-                it = object.next;
-                allocator.destroy(object);
-            }
+        pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+            allocator.destroy(@ptrCast(*const [capacity]T, self.head));
+            self.queue.deinit(allocator);
         }
 
         pub fn acquire(self: *Self, allocator: *mem.Allocator) !*T {
-            if (self.head) |object| {
-                self.head = object.next;
-                self.len -= 1;
-                return &object.item;
+            if (self.queue.tryPop()) |item| {
+                return item;
             }
-
-            const object = try allocator.create(Object);
-            return &object.item;
+            return try allocator.create(T);
         }
 
         pub fn release(self: *Self, allocator: *mem.Allocator, item: *T) void {
-            const object = @fieldParentPtr(Object, "item", item);
-            if (self.len == capacity) {
-                allocator.destroy(object);
-            } else {
-                object.next = self.head;
-                object.item = undefined;
-                self.head = object;
-                self.len += 1;
+            if (@ptrToInt(item) >= @ptrToInt(self.head) and @ptrToInt(item) <= @ptrToInt(self.head + capacity - 1)) {
+                while (true) {
+                    if (self.queue.tryPush(item)) {
+                        break;
+                    }
+                }
+                return;
             }
+            allocator.destroy(item);
         }
     };
 }
@@ -71,22 +57,13 @@ test {
 test "object_pool: test invariants" {
     const allocator = testing.allocator;
 
-    var pool = try ObjectPool(u8, 3).init(allocator);
+    var pool = try ObjectPool(u8, 2).init(allocator);
     defer pool.deinit(allocator);
 
-    testing.expect(pool.len == 3);
     const a = try pool.acquire(allocator);
     const b = try pool.acquire(allocator);
     const c = try pool.acquire(allocator);
-    testing.expect(pool.len == 0);
-    const d = try pool.acquire(allocator);
-    testing.expect(pool.len == 0);
-    pool.release(allocator, d);
-    testing.expect(pool.len == 1);
     pool.release(allocator, c);
-    testing.expect(pool.len == 2);
     pool.release(allocator, b);
-    testing.expect(pool.len == 3);
     pool.release(allocator, a);
-    testing.expect(pool.len == 3);
 }
