@@ -37,11 +37,8 @@ pub const AsyncAutoResetEvent = struct {
         while (state != NOTIFIED) {
             if (state != EMPTY) {
                 state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
-                    if (state != EMPTY) {
-                        const node = @intToPtr(*Node, state);
-                        return &node.runnable;
-                    }
-                    return null;
+                    const node = @intToPtr(*Node, state);
+                    return &node.runnable;
                 };
             } else {
                 state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Monotonic, .Monotonic) orelse {
@@ -103,7 +100,7 @@ pub fn AsyncSink(comptime T: type) type {
 
         pub fn pop(self: *Self) ?*Sink(T).Node {
             self.event.wait();
-            return self.sink.tryPop();
+            return self.tryPop();
         }
 
         pub fn tryPopBatch(self: *Self, b_first: **Sink(T).Node, b_last: **Sink(T).Node) usize {
