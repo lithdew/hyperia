@@ -110,7 +110,7 @@ pub fn Channel(comptime T: type) type {
             var node: Node = .{ .frame = @frame() };
 
             suspend {
-                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                var state = @atomicLoad(usize, &self.state, .Acquire);
 
                 while (true) {
                     const new_state = switch (state) {
@@ -128,7 +128,7 @@ pub fn Channel(comptime T: type) type {
                         },
                     };
 
-                    state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Monotonic) orelse break;
+                    state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Acquire) orelse break;
                 }
             }
 
@@ -136,7 +136,7 @@ pub fn Channel(comptime T: type) type {
         }
 
         pub fn put(self: *Self, data: T) void {
-            const state = @atomicRmw(usize, &self.state, .Xchg, NOTIFIED, .Acquire);
+            const state = @atomicRmw(usize, &self.state, .Xchg, NOTIFIED, .AcqRel);
             if (state == EMPTY or state == NOTIFIED) return;
 
             self.data = data;

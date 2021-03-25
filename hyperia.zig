@@ -9,6 +9,7 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 pub const mpsc = @import("mpsc.zig");
+pub const mpmc = @import("mpmc.zig");
 pub const oneshot = @import("oneshot.zig");
 
 pub const timer = @import("timer.zig");
