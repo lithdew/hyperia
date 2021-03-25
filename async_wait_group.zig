@@ -2,6 +2,7 @@ const std = @import("std");
 const zap = @import("zap");
 const hyperia = @import("hyperia.zig");
 
+const mpsc = hyperia.mpsc;
 const testing = std.testing;
 
 pub const AsyncWaitGroup = struct {
@@ -17,46 +18,29 @@ pub const AsyncWaitGroup = struct {
         }
     };
 
-    lock: std.Thread.Mutex = .{},
-    waiter: ?*Node = null,
     state: usize = 0,
+    event: mpsc.AsyncAutoResetEvent = .{},
 
     pub fn add(self: *Self, delta: usize) void {
         if (delta == 0) return;
 
-        const held = self.lock.acquire();
-        defer held.release();
-
-        self.state += delta;
+        _ = @atomicRmw(usize, &self.state, .Add, delta, .Monotonic);
     }
 
     pub fn sub(self: *Self, delta: usize) void {
         if (delta == 0) return;
+        if (@atomicRmw(usize, &self.state, .Sub, delta, .Release) - delta != 0) return;
 
-        const held = self.lock.acquire();
-        defer held.release();
+        @fence(.Acquire);
 
-        self.state -= delta;
-        if (self.state != 0) {
-            return;
+        if (self.event.set()) |runnable| {
+            hyperia.pool.schedule(.{}, runnable);
         }
-
-        const waiter = self.waiter orelse return;
-        self.waiter = null;
-
-        hyperia.pool.schedule(.{}, &waiter.runnable);
     }
 
     pub fn wait(self: *Self) void {
-        const held = self.lock.acquire();
-        if (self.state == 0) {
-            held.release();
-        } else {
-            suspend {
-                var waiter: Node = .{ .frame = @frame() };
-                self.waiter = &waiter;
-                held.release();
-            }
+        while (@atomicLoad(usize, &self.state, .Monotonic) != 0) {
+            self.event.wait();
         }
     }
 };
