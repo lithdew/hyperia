@@ -130,10 +130,7 @@ pub const Server = struct {
 
             while (true) {
                 const old_len = buf.items.len;
-
-                if (buf.capacity - buf.items.len < 4096) {
-                    try buf.ensureCapacity(4096);
-                }
+                try buf.ensureCapacity(4096);
                 buf.items.len = buf.capacity;
 
                 const num_bytes = try self.socket.recv(buf.items[old_len..], os.MSG_NOSIGNAL);
