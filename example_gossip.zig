@@ -109,14 +109,29 @@ pub const Client = struct {
                 .read => |result| return result,
             }
 
-            // self.status.reset(); (block acquire()'s that may have got a hold of this instance)
-            // ... messages that leaked before self.status.reset() may still be queued
-            // self.cleanup(); (cleanup leaked messages)
+            const is_last_connection = check: {
+                const held = self.client.lock.acquire();
+                defer held.release();
+
+                // self.status.reset(); (block acquire()'s that may have got a hold of this instance)
+                self.status.reset();
+
+                // ... messages that leaked before self.status.reset() may still be queued
+                // self.cleanup(); (cleanup leaked messages)
+                self.cleanup();
+
+                break :check self.client.pos == 1;
+            };
+
             // if we are the last client in the pool, retry
             // - if successful,   self.status.set(error.RetryAcquiringConnection) (let acquire() waiters retry and acquire this connection)
             // - if unsuccessful, self.status.set(last_connection_error); (let acquire() waiters fail stating we tried our best but couldn't acquire a connection)
             // else
             // - self.status.set(error.RetryAcquiringConnection) (let acquire() waiters find another available connection)
+
+            if (is_last_connection) {}
+
+            self.status.set(error.RetryAcquiringConnection);
         }
 
         pub fn cleanup(self: *Connection) void {
