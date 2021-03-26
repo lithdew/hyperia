@@ -45,7 +45,7 @@ pub fn select(cases: anytype) ResultUnionOf(@TypeOf(cases)) {
                 fn call(channel: *Channel, case: C) void {
                     const result = @call(.{}, C.function, case.args);
                     const result_union = @unionInit(ResultUnion, case_name, result);
-                    channel.put(result_union);
+                    channel.set(result_union);
                 }
             };
         }

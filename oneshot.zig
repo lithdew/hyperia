@@ -135,7 +135,7 @@ pub fn Channel(comptime T: type) type {
             return self.data;
         }
 
-        pub fn put(self: *Self, data: T) void {
+        pub fn set(self: *Self, data: T) void {
             const state = @atomicRmw(usize, &self.state, .Xchg, NOTIFIED, .AcqRel);
             if (state == EMPTY or state == NOTIFIED) return;
 
@@ -168,7 +168,7 @@ test "oneshot/channel: multiple waiters" {
     var c = async channel.wait();
     var d = async channel.wait();
 
-    channel.put({});
+    channel.set({});
 
     nosuspend await a;
     nosuspend await b;
@@ -179,115 +179,81 @@ test "oneshot/channel: multiple waiters" {
 }
 
 test "oneshot/channel: stress test" {
-    const Waiter = struct {
-        lock: *std.Thread.Mutex,
-        cond: *std.Thread.Condition,
-        count: *usize,
-
-        channel: *Channel(void),
+    const Frame = struct {
         runnable: zap.Pool.Runnable = .{ .runFn = run },
-        frame: @Frame(runAsync) = undefined,
+        frame: anyframe,
 
         fn run(runnable: *zap.Pool.Runnable) void {
             const self = @fieldParentPtr(@This(), "runnable", runnable);
-            self.frame = async self.runAsync();
+            resume self.frame;
         }
+    };
 
-        fn runAsync(self: *@This()) void {
+    const Context = struct {
+        channel: Channel(void) = .{},
+
+        event: std.Thread.StaticResetEvent = .{},
+        waiter_count: usize,
+        setter_count: usize,
+
+        fn runWaiter(self: *@This()) void {
+            var frame: Frame = .{ .frame = @frame() };
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
+
             self.channel.wait();
+        }
+
+        fn runSetter(self: *@This()) void {
+            var frame: Frame = .{ .frame = @frame() };
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
+
+            self.channel.set({});
+        }
+
+        pub fn run(self: *@This()) !void {
+            var frame: Frame = .{ .frame = @frame() };
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
+
+            var waiters = try testing.allocator.alloc(@Frame(@This().runWaiter), self.waiter_count);
+            var setters = try testing.allocator.alloc(@Frame(@This().runSetter), self.setter_count);
+
+            for (waiters) |*waiter| waiter.* = async self.runWaiter();
+            for (setters) |*setter| setter.* = async self.runSetter();
+
+            for (waiters) |*waiter| await waiter;
+            for (setters) |*setter| await setter;
 
             suspend {
-                const held = self.lock.acquire();
-                defer held.release();
-
-                self.count.* -= 1;
-                self.cond.signal();
+                testing.allocator.free(setters);
+                testing.allocator.free(waiters);
+                self.event.set();
             }
         }
     };
 
-    const Putter = struct {
-        lock: *std.Thread.Mutex,
-        cond: *std.Thread.Condition,
-        count: *usize,
+    const path = try std.fs.selfExePathAlloc(testing.allocator);
+    defer testing.allocator.free(path);
 
-        channel: *Channel(void),
-        runnable: zap.Pool.Runnable = .{ .runFn = run },
-        frame: @Frame(runAsync) = undefined,
-
-        fn run(runnable: *zap.Pool.Runnable) void {
-            const self = @fieldParentPtr(@This(), "runnable", runnable);
-            self.frame = async self.runAsync();
-        }
-
-        fn runAsync(self: *@This()) void {
-            self.channel.put({});
-
-            suspend {
-                const held = self.lock.acquire();
-                defer held.release();
-
-                self.count.* -= 1;
-                self.cond.signal();
-            }
-        }
-    };
+    std.debug.print("{s}\n", .{path});
 
     hyperia.init();
     defer hyperia.deinit();
 
     const allocator = testing.allocator;
 
-    var test_count: usize = 10_000;
-    var rand = std.rand.DefaultPrng.init(0);
+    var test_count: usize = 1000;
+    var rand = std.rand.DefaultPrng.init(@intCast(u64, std.time.milliTimestamp()));
 
     while (test_count > 0) : (test_count -= 1) {
-        var lock: std.Thread.Mutex = .{};
-        var cond: std.Thread.Condition = .{};
-        var count: usize = 0;
-
-        var waiters = std.ArrayList(Waiter).init(allocator);
-        defer waiters.deinit();
-
-        var putters = std.ArrayList(Putter).init(allocator);
-        defer putters.deinit();
-
         const waiter_count = rand.random.intRangeAtMost(usize, 4, 10);
-        const putter_count = rand.random.intRangeAtMost(usize, 4, 10);
+        const setter_count = rand.random.intRangeAtMost(usize, 4, 10);
 
-        count = waiter_count + putter_count;
+        var ctx: Context = .{
+            .waiter_count = waiter_count,
+            .setter_count = setter_count,
+        };
 
-        var batch: zap.Pool.Batch = .{};
-        var channel: Channel(void) = .{};
-
-        var i: usize = 0;
-        while (i < waiter_count) : (i += 1) {
-            try waiters.append(Waiter{
-                .lock = &lock,
-                .cond = &cond,
-                .count = &count,
-                .channel = &channel,
-            });
-        }
-
-        var j: usize = 0;
-        while (j < putter_count) : (j += 1) {
-            try putters.append(Putter{
-                .lock = &lock,
-                .cond = &cond,
-                .count = &count,
-                .channel = &channel,
-            });
-        }
-
-        for (waiters.items) |*waiter| batch.push(&waiter.runnable);
-        for (putters.items) |*putter| batch.push(&putter.runnable);
-
-        hyperia.pool.schedule(.{}, batch);
-
-        const held = lock.acquire();
-        defer held.release();
-
-        while (count != 0) cond.wait(&lock);
+        var frame = async ctx.run();
+        ctx.event.wait();
     }
 }
