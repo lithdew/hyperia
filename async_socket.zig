@@ -183,6 +183,7 @@ pub const AsyncSocket = struct {
                     if (self.writable.wait() == CANCELLED) {
                         return error.Cancelled;
                     }
+                    continue;
                 },
                 else => return err,
             };
@@ -305,6 +306,12 @@ test "socket/async" {
                 },
                 event,
             );
+
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
+
+            const handle = @intToPtr(*Reactor.Handle, event.data);
+            handle.call(&batch, event);
         }
     }{ .expected_data = @ptrToInt(&b.handle) }, null);
 

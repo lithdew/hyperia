@@ -54,14 +54,17 @@ pub const Client = struct {
     const Self = @This();
 
     pub const Connection = struct {
+        const ConnectError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
+
         client: *Self,
         socket: AsyncSocket,
         frame: @Frame(Connection.start),
         queue: mpsc.AsyncSink([]const u8),
-        status: oneshot.Channel(?AsyncSocket.ConnectError),
+        status: oneshot.Channel(?ConnectError),
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
-            self.socket.connect(self.client.address) catch |err| {
+            // TODO(kenta): look into deadlock when connection address is not available
+            self.connect(reactor) catch |err| {
                 if (self.status.set()) {
                     self.status.commit(err);
                 }
@@ -148,7 +151,7 @@ pub const Client = struct {
                 }
 
                 var num_attempts: usize = 0;
-                var last_err: AsyncSocket.ConnectError = undefined;
+                var last_err: ConnectError = undefined;
                 while (true) : (num_attempts += 1) {
                     if (self.status.get() != null) {
                         return error.Cancelled;
@@ -161,20 +164,12 @@ pub const Client = struct {
                         return last_err;
                     }
 
-                    log.info("attempting to reconnect to [{d}] {}...", .{ self.client.address, num_attempts });
+                    log.info("attempting to reconnect to [{d}] {}...", .{
+                        self.client.address,
+                        num_attempts,
+                    });
 
-                    self.socket = AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.AF_INET) catch |err| {
-                        last_err = error.SystemResources;
-                        continue;
-                    };
-                    errdefer self.socket.deinit();
-
-                    reactor.add(self.socket.socket.fd, &self.socket.handle, .{ .readable = true, .writable = true }) catch |err| {
-                        last_err = error.SystemResources;
-                        continue;
-                    };
-
-                    self.socket.connect(self.client.address) catch |err| {
+                    self.connect(reactor) catch |err| {
                         last_err = err;
                         continue;
                     };
@@ -186,6 +181,14 @@ pub const Client = struct {
                     self.status.commit(error.WouldBlock);
                 }
             }
+        }
+
+        fn connect(self: *Connection, reactor: Reactor) ConnectError!void {
+            self.socket = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+            errdefer self.socket.deinit();
+
+            try reactor.add(self.socket.socket.fd, &self.socket.handle, .{ .readable = true, .writable = true });
+            try self.socket.connect(self.client.address);
         }
 
         pub fn cleanup(self: *Connection) void {
@@ -279,11 +282,12 @@ pub const Client = struct {
                 // if reconnecting, cancel and continue
                 // else,            cancel and shutdown socket
 
-                const is_reconnecting = conn.status.get() == null;
+                const status = conn.status.get();
+                const not_alive = status == null or status.? != null;
 
                 conn.status.reset();
                 if (conn.status.set()) conn.status.commit(error.Cancelled);
-                if (is_reconnecting) continue;
+                if (not_alive) continue;
 
                 conn.socket.shutdown(.both) catch {};
             }
@@ -300,11 +304,6 @@ pub const Client = struct {
         conn.client = self;
         conn.queue = .{};
         conn.status = .{};
-
-        conn.socket = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
-        errdefer conn.socket.deinit();
-
-        try reactor.add(conn.socket.socket.fd, &conn.socket.handle, .{ .readable = true, .writable = true });
 
         self.pool[self.pos] = conn;
         self.pos += 1;

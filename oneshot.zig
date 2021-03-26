@@ -195,14 +195,16 @@ test "oneshot/channel: multiple waiters" {
     var c = async channel.wait();
     var d = async channel.wait();
 
-    channel.set({});
+    if (channel.set()) {
+        channel.commit({});
+    }
 
     nosuspend await a;
     nosuspend await b;
     nosuspend await c;
     nosuspend await d;
 
-    testing.expect(channel.state == Channel(void).NOTIFIED);
+    testing.expect(channel.state == Channel(void).COMMITTED);
 }
 
 test "oneshot/channel: stress test" {
