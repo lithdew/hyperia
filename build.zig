@@ -48,6 +48,7 @@ pub fn build(b: *Builder) void {
     inline for (.{
         "example_tcp_server",
         "example_http_server",
+        "example_gossip",
     }) |example_name| {
         const example_step = b.step(example_name, "Example " ++ example_name ++ ".zig");
 

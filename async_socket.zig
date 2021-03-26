@@ -234,7 +234,6 @@ pub const AsyncSocket = struct {
         if (event.is_hup) {
             if (self.readable.set(READY)) |runnable| batch.push(runnable);
             if (self.writable.set(READY)) |runnable| batch.push(runnable);
-            // TODO(kenta): deinitialize resources for connection
         }
     }
 };
