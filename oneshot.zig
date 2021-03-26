@@ -150,6 +150,11 @@ pub fn Channel(comptime T: type) type {
             return @cmpxchgStrong(usize, &self.state, state, new_state, .Monotonic, .Monotonic) == null;
         }
 
+        pub fn reset(self: *Self) void {
+            const state = @atomicRmw(usize, &self.state, .Xchg, EMPTY, .Acquire);
+            if (state & 0b11 != COMMITTED) unreachable;
+        }
+
         pub fn commit(self: *Self, data: T) void {
             self.data = data;
 
