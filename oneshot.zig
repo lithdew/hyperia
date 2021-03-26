@@ -141,21 +141,13 @@ pub fn Channel(comptime T: type) type {
 
         pub fn set(self: *Self) bool {
             var state = @atomicLoad(usize, &self.state, .Monotonic);
-            while (true) {
-                const new_state = switch (state & 0b11) {
-                    NOTIFIED, COMMITTED => return false,
-                    else => state | NOTIFIED,
-                };
 
-                state = @cmpxchgWeak(
-                    usize,
-                    &self.state,
-                    state,
-                    new_state,
-                    .Monotonic,
-                    .Monotonic,
-                ) orelse return true;
-            }
+            const new_state = switch (state & 0b11) {
+                NOTIFIED, COMMITTED => return false,
+                else => state | NOTIFIED,
+            };
+
+            return @cmpxchgStrong(usize, &self.state, state, new_state, .Monotonic, .Monotonic) == null;
         }
 
         pub fn commit(self: *Self, data: T) void {
