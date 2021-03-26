@@ -139,6 +139,13 @@ pub fn Channel(comptime T: type) type {
             return self.data;
         }
 
+        pub fn get(self: *Self) ?T {
+            if (@atomicLoad(usize, &self.state, .Acquire) != COMMITTED) {
+                return null;
+            }
+            return self.data;
+        }
+
         pub fn set(self: *Self) bool {
             var state = @atomicLoad(usize, &self.state, .Monotonic);
 

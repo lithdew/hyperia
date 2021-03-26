@@ -58,9 +58,9 @@ pub const Client = struct {
         socket: AsyncSocket,
         frame: @Frame(Connection.start),
         queue: mpsc.AsyncSink([]const u8),
-        status: oneshot.Channel(AsyncSocket.ConnectError!void),
+        status: oneshot.Channel(?AsyncSocket.ConnectError),
 
-        pub fn start(self: *Connection) !void {
+        pub fn start(self: *Connection, reactor: Reactor) !void {
             self.socket.connect(self.client.address) catch |err| {
                 if (self.status.set()) {
                     self.status.commit(err);
@@ -69,69 +69,119 @@ pub const Client = struct {
             };
 
             if (self.status.set()) {
-                self.status.commit({});
+                self.status.commit(null);
             }
 
             defer {
                 if (self.client.release(self)) {
                     suspend {
                         self.cleanup();
-                        self.socket.deinit();
                         self.client.wga.allocator.destroy(self);
                     }
                 }
             }
 
-            const Cases = struct {
-                write: struct {
-                    run: Case(Connection.writeLoop),
-                    cancel: Case(mpsc.AsyncSink([]const u8).cancel),
-                },
-                read: struct {
-                    run: Case(Connection.readLoop),
-                    cancel: Case(AsyncSocket.cancel),
-                },
-            };
+            while (true) {
+                const Cases = struct {
+                    write: struct {
+                        run: Case(Connection.writeLoop),
+                        cancel: Case(mpsc.AsyncSink([]const u8).cancel),
+                    },
+                    read: struct {
+                        run: Case(Connection.readLoop),
+                        cancel: Case(AsyncSocket.cancel),
+                    },
+                };
 
-            switch (select(
-                Cases{
-                    .write = .{
-                        .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
+                switch (select(
+                    Cases{
+                        .write = .{
+                            .run = call(Connection.writeLoop, .{self}),
+                            .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
+                        },
+                        .read = .{
+                            .run = call(Connection.readLoop, .{self}),
+                            .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
+                        },
                     },
-                    .read = .{
-                        .run = call(Connection.readLoop, .{self}),
-                        .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
-                    },
-                },
-            )) {
-                .write => |result| return result,
-                .read => |result| return result,
+                )) {
+                    .write => |result| {},
+                    .read => |result| {},
+                }
+
+                const is_last_connection = check: {
+                    const held = self.client.lock.acquire();
+                    defer held.release();
+
+                    // self.status.reset(); (block acquire()'s that may have got a hold of this instance)
+                    const was_cancelled = cancelled: {
+                        if (self.status.get()) |maybe_status| {
+                            const status = maybe_status orelse break :cancelled false;
+                            break :cancelled status == error.Cancelled;
+                        }
+                        break :cancelled false;
+                    };
+
+                    if (!was_cancelled) {
+                        self.status.reset();
+                    }
+
+                    // ... messages that leaked before self.status.reset() may still be queued
+                    // self.cleanup(); (cleanup leaked messages)
+                    self.cleanup();
+                    self.socket.deinit();
+
+                    break :check self.client.pos == 1;
+                };
+
+                // if we are the last client in the pool, retry
+                // - if successful,   self.status.set(error.RetryAcquiringConnection) (let acquire() waiters retry and acquire this connection)
+                // - if unsuccessful, self.status.set(last_connection_error); (let acquire() waiters fail stating we tried our best but couldn't acquire a connection)
+                // else
+                // - self.status.set(error.RetryAcquiringConnection) (let acquire() waiters find another available connection)
+
+                if (!is_last_connection) {
+                    if (self.status.set()) {
+                        self.status.commit(error.WouldBlock);
+                    }
+                    return;
+                }
+
+                var num_attempts: usize = 0;
+                var last_err: AsyncSocket.ConnectError = undefined;
+                while (true) : (num_attempts += 1) {
+                    if (self.status.get() != null) {
+                        return error.Cancelled;
+                    }
+
+                    if (num_attempts == 10) {
+                        if (self.status.set()) {
+                            self.status.commit(last_err);
+                        }
+                        return last_err;
+                    }
+
+                    log.info("attempting to reconnect to [{d}] {}...", .{ self.client.address, num_attempts });
+
+                    self.socket = AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.AF_INET) catch |err| {
+                        last_err = error.SystemResources;
+                        continue;
+                    };
+                    errdefer self.socket.deinit();
+
+                    reactor.add(self.socket.socket.fd, &self.socket.handle, .{ .readable = true, .writable = true }) catch |err| {
+                        last_err = error.SystemResources;
+                        continue;
+                    };
+
+                    self.socket.connect(self.client.address) catch |err| {
+                        last_err = err;
+                        continue;
+                    };
+
+                    break;
+                }
             }
-
-            const is_last_connection = check: {
-                const held = self.client.lock.acquire();
-                defer held.release();
-
-                // self.status.reset(); (block acquire()'s that may have got a hold of this instance)
-                self.status.reset();
-
-                // ... messages that leaked before self.status.reset() may still be queued
-                // self.cleanup(); (cleanup leaked messages)
-                self.cleanup();
-
-                break :check self.client.pos == 1;
-            };
-
-            // if we are the last client in the pool, retry
-            // - if successful,   self.status.set(error.RetryAcquiringConnection) (let acquire() waiters retry and acquire this connection)
-            // - if unsuccessful, self.status.set(last_connection_error); (let acquire() waiters fail stating we tried our best but couldn't acquire a connection)
-            // else
-            // - self.status.set(error.RetryAcquiringConnection) (let acquire() waiters find another available connection)
-
-            if (is_last_connection) {}
-
-            self.status.set(error.RetryAcquiringConnection);
         }
 
         pub fn cleanup(self: *Connection) void {
@@ -219,6 +269,22 @@ pub const Client = struct {
 
             for (self.pool[0..self.pos]) |conn, i| {
                 log.info("closing [{d}] {}", .{ i, self.address });
+
+                // TODO(kenta): below should be cleaned up
+
+                // if reconnecting, cancel and continue
+                // else,            cancel and shutdown socket
+
+                if (conn.status.set()) {
+                    conn.status.commit(error.Cancelled);
+                    continue;
+                }
+
+                conn.status.reset();
+                if (conn.status.set()) {
+                    conn.status.commit(error.Cancelled);
+                }
+
                 conn.socket.shutdown(.both) catch {};
             }
         }
@@ -243,7 +309,7 @@ pub const Client = struct {
         self.pool[self.pos] = conn;
         self.pos += 1;
 
-        conn.frame = async conn.start();
+        conn.frame = async conn.start(reactor);
 
         return conn;
     }
@@ -297,7 +363,9 @@ pub const Client = struct {
             break :connect min_conn;
         };
 
-        try pooled_conn.status.wait();
+        if (pooled_conn.status.wait()) |err| {
+            return err;
+        }
 
         return pooled_conn;
     }
