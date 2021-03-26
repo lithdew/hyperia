@@ -275,15 +275,11 @@ pub const Client = struct {
                 // if reconnecting, cancel and continue
                 // else,            cancel and shutdown socket
 
-                if (conn.status.set()) {
-                    conn.status.commit(error.Cancelled);
-                    continue;
-                }
+                const is_reconnecting = conn.status.get() == null;
 
                 conn.status.reset();
-                if (conn.status.set()) {
-                    conn.status.commit(error.Cancelled);
-                }
+                if (conn.status.set()) conn.status.commit(error.Cancelled);
+                if (is_reconnecting) continue;
 
                 conn.socket.shutdown(.both) catch {};
             }
