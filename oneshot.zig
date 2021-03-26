@@ -231,15 +231,8 @@ test "oneshot/channel: stress test" {
         }
     };
 
-    const path = try std.fs.selfExePathAlloc(testing.allocator);
-    defer testing.allocator.free(path);
-
-    std.debug.print("{s}\n", .{path});
-
     hyperia.init();
     defer hyperia.deinit();
-
-    const allocator = testing.allocator;
 
     var test_count: usize = 1000;
     var rand = std.rand.DefaultPrng.init(@intCast(u64, std.time.milliTimestamp()));
