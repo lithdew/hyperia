@@ -181,6 +181,10 @@ pub const Client = struct {
 
                     break;
                 }
+
+                if (self.status.set()) {
+                    self.status.commit(error.WouldBlock);
+                }
             }
         }
 
