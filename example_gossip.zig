@@ -18,6 +18,85 @@ pub const log_level = .debug;
 
 var stopped: bool = false;
 
+// get_client()
+//      if (pooling strategy wants to create new connection)
+//          return connect()
+//      return existing_connection
+
+// connect()
+//      if (client connected before s.t. connection being retried)
+//          oneshot channel wait
+//          return oneshot channel result (connection or error)
+//      status = connect()
+//      if (status == fail)
+//          return status.error
+//      spawn client()
+//      return connection
+
+// client()
+//      while (true)
+//          spawn read and write workers
+//          wait until either read or write worker closes
+//          cleanup pending messages/requests/etc.
+//          if (is_last_connection_in_pool)
+//              while (true) : (reconnection_attempt += 1)
+//                  status = connect()
+//                  if (status == success)
+//                      break
+//                  if (reconnection_attempt >= max_attempts)
+//                      report to oneshot channel
+//                      return
+
+pub const Client = struct {
+    const Self = @This();
+
+    pub const Connection = struct {
+        queue: mpsc.AsyncSink([]const u8) = .{},
+    };
+
+    pub const capacity = 4;
+
+    lock: std.Thread.Mutex = .{},
+    pool: [*]*Connection,
+    pos: usize = 0,
+
+    pub fn init(allocator: *mem.Allocator) !Client {
+        const pool = try allocator.create([capacity]*Connection);
+        errdefer allocator.free(pool);
+
+        return Client{ .pool = pool };
+    }
+
+    pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+        allocator.free(@ptrCast(*const [capacity]*Connection, self.pool));
+    }
+
+    pub fn acquire(self: *Self) ?*Connection {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        const pool = self.pool[0..self.pos];
+        if (pool.len == 0) return null;
+
+        var min_conn = pool[0];
+        var min_pending = 0; // pending queued writes
+        if (min_pending == 0) return min_conn;
+
+        for (pool[1..]) |conn| {
+            const pending = 0; // pending queued writes
+            if (pending == 0) return conn;
+            if (pending < min_pending) {
+                min_conn = conn;
+                min_pending = pending;
+            }
+        }
+
+        if (pool.len < capacity) return null;
+
+        return min_conn;
+    }
+};
+
 pub const Node = struct {
     pub const Connection = struct {};
 
