@@ -10,6 +10,7 @@ const os = std.os;
 const net = std.net;
 const mem = std.mem;
 const mpsc = hyperia.mpsc;
+const oneshot = hyperia.oneshot;
 const log = std.log.scoped(.gossip);
 
 usingnamespace hyperia.select;
@@ -51,7 +52,33 @@ pub const Client = struct {
     const Self = @This();
 
     pub const Connection = struct {
-        queue: mpsc.AsyncSink([]const u8) = .{},
+        client: *Self,
+        socket: AsyncSocket,
+        frame: @Frame(Connection.start),
+        queue: mpsc.AsyncSink([]const u8),
+        status: oneshot.Channel(AsyncSocket.ConnectError!void),
+
+        pub fn start(self: *Connection) !void {
+            self.socket.connect(self.client.address) catch |err| {
+                if (self.status.set()) {
+                    self.status.commit(err);
+                }
+                return err;
+            };
+
+            if (self.status.set()) {
+                self.status.commit({});
+            }
+
+            defer {
+                if (self.client.release(self)) {
+                    suspend {
+                        self.socket.deinit();
+                        self.client.wga.allocator.destroy(self);
+                    }
+                }
+            }
+        }
     };
 
     pub const capacity = 4;
@@ -60,40 +87,103 @@ pub const Client = struct {
     pool: [*]*Connection,
     pos: usize = 0,
 
-    pub fn init(allocator: *mem.Allocator) !Client {
-        const pool = try allocator.create([capacity]*Connection);
-        errdefer allocator.free(pool);
+    address: net.Address,
+    wga: AsyncWaitGroupAllocator = .{},
 
-        return Client{ .pool = pool };
+    pub fn init(allocator: *mem.Allocator, address: net.Address) !Client {
+        const pool = try allocator.create([capacity]*Connection);
+        errdefer allocator.destroy(pool);
+
+        return Client{ .pool = pool, .address = address, .wga = .{ .backing_allocator = allocator } };
     }
 
     pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
-        allocator.free(@ptrCast(*const [capacity]*Connection, self.pool));
-    }
+        {
+            const held = self.lock.acquire();
+            defer held.release();
 
-    pub fn acquire(self: *Self) ?*Connection {
-        const held = self.lock.acquire();
-        defer held.release();
-
-        const pool = self.pool[0..self.pos];
-        if (pool.len == 0) return null;
-
-        var min_conn = pool[0];
-        var min_pending = 0; // pending queued writes
-        if (min_pending == 0) return min_conn;
-
-        for (pool[1..]) |conn| {
-            const pending = 0; // pending queued writes
-            if (pending == 0) return conn;
-            if (pending < min_pending) {
-                min_conn = conn;
-                min_pending = pending;
+            for (self.pool[0..self.pos]) |conn| {
+                conn.shutdown(.both) catch {};
             }
         }
 
-        if (pool.len < capacity) return null;
+        self.wga.wait();
+        allocator.destroy(@ptrCast(*const [capacity]*Connection, self.pool));
+    }
 
-        return min_conn;
+    fn connect(self: *Self, reactor: Reactor) !*Connection {
+        const conn = try self.wga.allocator.create(Connection);
+        errdefer self.wga.allocator.destroy(conn);
+
+        conn.client = self;
+        conn.queue = .{};
+        conn.status = .{};
+
+        conn.socket = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
+        errdefer conn.socket.deinit();
+
+        try reactor.add(conn.socket.fd, &conn.socket.handle, .{ .readable = true, .writable = true });
+
+        self.pool[self.pos] = conn;
+        self.pos += 1;
+
+        conn.frame = async conn.start();
+
+        return conn;
+    }
+
+    fn release(self: *Self, conn: *Connection) bool {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        if (mem.indexOf(*Connection, self.pool[0..self.pos], conn)) |i| {
+            if (i == self.pos - 1) {
+                self.pool[i] = undefined;
+                self.pos -= 1;
+                return true;
+            }
+
+            self.pool[i] = self.pool[self.pos - 1];
+            self.pos -= 1;
+            return true;
+        }
+
+        return false;
+    }
+
+    pub fn acquire(self: *Self, reactor: Reactor) !*Connection {
+        const pooled_conn: *Connection = connect: {
+            const held = self.lock.acquire();
+            defer held.release();
+
+            const pool = self.pool[0..self.pos];
+            if (pool.len == 0) {
+                break :connect try self.connect(reactor, allocator);
+            }
+
+            var min_conn = pool[0];
+            var min_pending = 0; // pending queued writes
+            if (min_pending == 0) break :connect min_conn;
+
+            for (pool[1..]) |conn| {
+                const pending = 0; // pending queued writes
+                if (pending == 0) break :connect conn;
+                if (pending < min_pending) {
+                    min_conn = conn;
+                    min_pending = pending;
+                }
+            }
+
+            if (pool.len < capacity) {
+                break :connect try self.connect(reactor, allocator);
+            }
+
+            break :connect min_conn;
+        };
+
+        try pooled_conn.status.wait();
+
+        return pooled_conn;
     }
 };
 

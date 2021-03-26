@@ -102,7 +102,9 @@ pub const AsyncSocket = struct {
         return self.socket.accept(flags);
     }
 
-    pub fn read(self: *Self, buf: []u8) (os.ReadError || Error)!usize {
+    pub const ReadError = os.ReadError || Error;
+
+    pub fn read(self: *Self, buf: []u8) ReadError!usize {
         while (true) {
             const num_bytes = self.tryRead(buf) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -118,7 +120,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn recv(self: *Self, buf: []u8, flags: u32) (os.RecvFromError || Error)!usize {
+    pub const RecvFromError = os.RecvFromError || Error;
+
+    pub fn recv(self: *Self, buf: []u8, flags: u32) RecvFromError!usize {
         while (true) {
             const num_bytes = self.tryRecv(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -134,7 +138,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn write(self: *Self, buf: []const u8) (os.WriteError || Error)!usize {
+    pub const WriteError = os.WriteError || Error;
+
+    pub fn write(self: *Self, buf: []const u8) WriteError!usize {
         while (true) {
             const num_bytes = self.tryWrite(buf) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -150,7 +156,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn send(self: *Self, buf: []const u8, flags: u32) (os.SendError || Error)!usize {
+    pub const SendError = os.SendError || Error;
+
+    pub fn send(self: *Self, buf: []const u8, flags: u32) SendError!usize {
         while (true) {
             const num_bytes = self.trySend(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -166,7 +174,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn connect(self: *Self, address: net.Address) (os.ConnectError || Error)!void {
+    pub const ConnectError = os.ConnectError || Error;
+
+    pub fn connect(self: *Self, address: net.Address) ConnectError!void {
         while (true) {
             return self.tryConnect(address) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -179,7 +189,9 @@ pub const AsyncSocket = struct {
         }
     }
 
-    pub fn accept(self: *Self, flags: u32) (os.AcceptError || Error)!Socket.Connection {
+    pub const AcceptError = os.AcceptError || Error;
+
+    pub fn accept(self: *Self, flags: u32) AcceptError!Socket.Connection {
         while (true) {
             const connection = self.tryAccept(flags) catch |err| switch (err) {
                 error.WouldBlock => {
