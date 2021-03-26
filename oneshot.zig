@@ -102,6 +102,7 @@ pub fn Channel(comptime T: type) type {
 
         const EMPTY = 0;
         const NOTIFIED = 1;
+        const COMMITTED = 2;
 
         state: usize = EMPTY,
         data: T = undefined,
@@ -110,40 +111,62 @@ pub fn Channel(comptime T: type) type {
             var node: Node = .{ .frame = @frame() };
 
             suspend {
-                var state = @atomicLoad(usize, &self.state, .Acquire);
+                var state = @atomicLoad(usize, &self.state, .Monotonic);
 
                 while (true) {
-                    const new_state = switch (state) {
-                        EMPTY => update: {
-                            node.next = null;
-                            break :update @ptrToInt(&node);
-                        },
-                        NOTIFIED => {
+                    const new_state = switch (state & 0b11) {
+                        COMMITTED => {
                             hyperia.pool.schedule(.{}, &node.runnable);
                             break;
                         },
                         else => update: {
-                            node.next = @intToPtr(?*Node, state);
-                            break :update @ptrToInt(&node);
+                            node.next = @intToPtr(?*Node, state & ~@as(usize, 0b11));
+                            break :update @ptrToInt(&node) | (state & 0b11);
                         },
                     };
 
-                    state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Acquire) orelse break;
+                    state = @cmpxchgWeak(
+                        usize,
+                        &self.state,
+                        state,
+                        new_state,
+                        .Release,
+                        .Monotonic,
+                    ) orelse break;
                 }
             }
 
             return self.data;
         }
 
-        pub fn set(self: *Self, data: T) void {
-            const state = @atomicRmw(usize, &self.state, .Xchg, NOTIFIED, .AcqRel);
-            if (state == EMPTY or state == NOTIFIED) return;
+        pub fn set(self: *Self) bool {
+            var state = @atomicLoad(usize, &self.state, .Monotonic);
+            while (true) {
+                const new_state = switch (state & 0b11) {
+                    NOTIFIED, COMMITTED => return false,
+                    else => state | NOTIFIED,
+                };
 
+                state = @cmpxchgWeak(
+                    usize,
+                    &self.state,
+                    state,
+                    new_state,
+                    .Monotonic,
+                    .Monotonic,
+                ) orelse return true;
+            }
+        }
+
+        pub fn commit(self: *Self, data: T) void {
             self.data = data;
+
+            const state = @atomicRmw(usize, &self.state, .Xchg, COMMITTED, .AcqRel);
+            if (state & 0b11 != NOTIFIED) unreachable;
 
             var batch: zap.Pool.Batch = .{};
 
-            var it = @intToPtr(?*Node, state);
+            var it = @intToPtr(?*Node, state & ~@as(usize, 0b11));
             while (it) |node| : (it = node.next) {
                 batch.push(&node.runnable);
             }
@@ -207,7 +230,9 @@ test "oneshot/channel: stress test" {
             var frame: Frame = .{ .frame = @frame() };
             suspend hyperia.pool.schedule(.{}, &frame.runnable);
 
-            self.channel.set({});
+            if (self.channel.set()) {
+                self.channel.commit({});
+            }
         }
 
         pub fn run(self: *@This()) !void {
@@ -235,7 +260,7 @@ test "oneshot/channel: stress test" {
     defer hyperia.deinit();
 
     var test_count: usize = 1000;
-    var rand = std.rand.DefaultPrng.init(@intCast(u64, std.time.milliTimestamp()));
+    var rand = std.rand.DefaultPrng.init(0);
 
     while (test_count > 0) : (test_count -= 1) {
         const waiter_count = rand.random.intRangeAtMost(usize, 4, 10);
