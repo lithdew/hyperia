@@ -166,9 +166,9 @@ pub const Client = struct {
                         return last_err;
                     }
 
-                    log.info("attempting to reconnect to [{d}] {}...", .{
-                        self.client.address,
+                    log.info("attempt {d}: reconnecting to {}...", .{
                         num_attempts,
+                        self.client.address,
                     });
 
                     self.connect(reactor) catch |err| {
