@@ -56,7 +56,6 @@ pub const Client = struct {
     pub const ConnectError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
 
     pub const ConnectionStatus = union(enum) {
-        connecting: void,
         connected: void,
         closed: void,
         failed: ConnectError,
