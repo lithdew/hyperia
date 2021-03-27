@@ -181,6 +181,9 @@ pub const Client = struct {
 
                 if (self.status.set()) {
                     self.status.commit(.closed);
+                } else {
+                    self.socket.deinit();
+                    return error.Cancelled;
                 }
             }
         }
