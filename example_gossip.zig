@@ -467,7 +467,6 @@ pub fn runClient(reactor: Reactor, client: *Client) !void {
 
 pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
     defer {
-        log.info("shutting down...", .{});
         @atomicStore(bool, &stopped, true, .Release);
         reactor_event.post();
     }
@@ -499,7 +498,10 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
         },
     )) {
         .client => |result| return result,
-        .ctrl_c => |result| return result,
+        .ctrl_c => |result| {
+            log.info("shutting down...", .{});
+            return result;
+        },
     }
 }
 
