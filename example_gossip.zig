@@ -53,29 +53,23 @@ var mpsc_node_pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undef
 pub const Client = struct {
     const Self = @This();
 
-    pub const Connection = struct {
-        const ConnectError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
+    pub const ConnectError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
 
+    pub const ConnectionStatus = union(enum) {
+        connecting: void,
+        connected: void,
+        closed: void,
+        failed: ConnectError,
+    };
+
+    pub const Connection = struct {
         client: *Self,
         socket: AsyncSocket,
         frame: @Frame(Connection.start),
         queue: mpsc.AsyncSink([]const u8),
-        status: oneshot.Channel(?ConnectError),
+        status: oneshot.Channel(ConnectionStatus),
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
-            // TODO(kenta): look into deadlock when connection address is not available
-
-            self.connect(reactor) catch |err| {
-                if (self.status.set()) {
-                    self.status.commit(err);
-                }
-                return err;
-            };
-
-            if (self.status.set()) {
-                self.status.commit(null);
-            }
-
             defer {
                 if (self.client.release(self)) {
                     suspend {
@@ -83,6 +77,17 @@ pub const Client = struct {
                         self.client.wga.allocator.destroy(self);
                     }
                 }
+            }
+
+            if (self.status.set()) {
+                self.connect(reactor) catch |err| {
+                    self.status.commit(.{ .failed = err });
+                    return err;
+                };
+
+                self.status.commit(.connected);
+            } else {
+                return;
             }
 
             while (true) {
@@ -117,21 +122,13 @@ pub const Client = struct {
                     const held = self.client.lock.acquire();
                     defer held.release();
 
-                    // self.status.reset(); (block acquire()'s that may have got a hold of this instance)
-                    const was_cancelled = cancelled: {
-                        if (self.status.get()) |maybe_status| {
-                            const status = maybe_status orelse break :cancelled false;
-                            break :cancelled status == error.Cancelled;
-                        }
-                        break :cancelled false;
-                    };
+                    // (block acquire()'s that may have got a hold of this instance)
 
-                    if (!was_cancelled) {
-                        self.status.reset();
-                    }
+                    const was_cancelled = if (self.status.get()) |status| status == .closed else false;
+                    if (!was_cancelled) self.status.reset();
 
                     // ... messages that leaked before self.status.reset() may still be queued
-                    // self.cleanup(); (cleanup leaked messages)
+                    // (cleanup leaked messages)
                     self.cleanup();
                     self.socket.deinit();
 
@@ -146,7 +143,7 @@ pub const Client = struct {
 
                 if (!is_last_connection) {
                     if (self.status.set()) {
-                        self.status.commit(error.WouldBlock);
+                        self.status.commit(.closed);
                     }
                     return;
                 }
@@ -154,13 +151,12 @@ pub const Client = struct {
                 var num_attempts: usize = 0;
                 var last_err: ConnectError = undefined;
                 while (true) : (num_attempts += 1) {
-                    if (self.status.get() != null) {
-                        return error.Cancelled;
-                    }
+                    const was_cancelled = if (self.status.get()) |status| status == .closed else false;
+                    if (was_cancelled) return error.Cancelled;
 
                     if (num_attempts == 10) {
                         if (self.status.set()) {
-                            self.status.commit(last_err);
+                            self.status.commit(.{ .failed = last_err });
                         }
                         return last_err;
                     }
@@ -179,7 +175,7 @@ pub const Client = struct {
                 }
 
                 if (self.status.set()) {
-                    self.status.commit(error.WouldBlock);
+                    self.status.commit(.closed);
                 }
             }
         }
@@ -284,10 +280,10 @@ pub const Client = struct {
                 // else,            cancel and shutdown socket
 
                 const status = conn.status.get();
-                const not_alive = status == null or status.? != null;
+                const not_alive = status == null or status.? != .connected;
 
                 conn.status.reset();
-                if (conn.status.set()) conn.status.commit(error.Cancelled);
+                if (conn.status.set()) conn.status.commit(.closed);
                 if (not_alive) continue;
 
                 conn.socket.shutdown(.both) catch {};
@@ -334,40 +330,44 @@ pub const Client = struct {
     }
 
     pub fn acquire(self: *Self, reactor: Reactor) !*Connection {
-        const pooled_conn: *Connection = connect: {
-            const held = self.lock.acquire();
-            defer held.release();
+        while (true) {
+            const pooled_conn: *Connection = connect: {
+                const held = self.lock.acquire();
+                defer held.release();
 
-            const pool = self.pool[0..self.pos];
-            if (pool.len == 0) {
-                break :connect try self.connect(reactor);
-            }
-
-            var min_conn = pool[0];
-            var min_pending: usize = 0; // pending queued writes
-            if (min_pending == 0) break :connect min_conn;
-
-            for (pool[1..]) |conn| {
-                const pending: usize = 0; // pending queued writes
-                if (pending == 0) break :connect conn;
-                if (pending < min_pending) {
-                    min_conn = conn;
-                    min_pending = pending;
+                const pool = self.pool[0..self.pos];
+                if (pool.len == 0) {
+                    break :connect try self.connect(reactor);
                 }
+
+                var min_conn = pool[0];
+                var min_pending: usize = 0; // pending queued writes
+                if (min_pending == 0) break :connect min_conn;
+
+                for (pool[1..]) |conn| {
+                    const pending: usize = 0; // pending queued writes
+                    if (pending == 0) break :connect conn;
+                    if (pending < min_pending) {
+                        min_conn = conn;
+                        min_pending = pending;
+                    }
+                }
+
+                if (pool.len < capacity) {
+                    break :connect try self.connect(reactor);
+                }
+
+                break :connect min_conn;
+            };
+
+            switch (pooled_conn.status.wait()) {
+                .failed => |err| return err,
+                .closed => continue,
+                else => {},
             }
 
-            if (pool.len < capacity) {
-                break :connect try self.connect(reactor);
-            }
-
-            break :connect min_conn;
-        };
-
-        if (pooled_conn.status.wait()) |err| {
-            return err;
+            return pooled_conn;
         }
-
-        return pooled_conn;
     }
 
     pub fn write(self: *Self, reactor: Reactor, buf: []const u8) !void {
