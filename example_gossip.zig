@@ -64,6 +64,7 @@ pub const Client = struct {
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
             // TODO(kenta): look into deadlock when connection address is not available
+
             self.connect(reactor) catch |err| {
                 if (self.status.set()) {
                     self.status.commit(err);

@@ -111,7 +111,7 @@ pub fn Channel(comptime T: type) type {
             var node: Node = .{ .frame = @frame() };
 
             suspend {
-                var state = @atomicLoad(usize, &self.state, .Monotonic);
+                var state = @atomicLoad(usize, &self.state, .Acquire);
 
                 while (true) {
                     const new_state = switch (state & 0b11) {
@@ -131,7 +131,7 @@ pub fn Channel(comptime T: type) type {
                         state,
                         new_state,
                         .Release,
-                        .Monotonic,
+                        .Acquire,
                     ) orelse break;
                 }
             }
@@ -154,12 +154,11 @@ pub fn Channel(comptime T: type) type {
                 else => state | NOTIFIED,
             };
 
-            return @cmpxchgStrong(usize, &self.state, state, new_state, .Monotonic, .Monotonic) == null;
+            return @cmpxchgStrong(usize, &self.state, state, new_state, .Acquire, .Monotonic) == null;
         }
 
         pub fn reset(self: *Self) void {
-            const state = @atomicRmw(usize, &self.state, .Xchg, EMPTY, .Acquire);
-            if (state & 0b11 != COMMITTED) unreachable;
+            @atomicStore(usize, &self.state, EMPTY, .Monotonic);
         }
 
         pub fn commit(self: *Self, data: T) void {
