@@ -87,7 +87,7 @@ pub const Client = struct {
 
                 self.status.commit(.connected);
             } else {
-                return;
+                return error.Cancelled;
             }
 
             while (true) {
@@ -124,8 +124,11 @@ pub const Client = struct {
 
                     // (block acquire()'s that may have got a hold of this instance)
 
-                    const was_cancelled = if (self.status.get()) |status| status == .closed else false;
-                    if (!was_cancelled) self.status.reset();
+                    if (self.status.get()) |status| {
+                        if (status != .closed) {
+                            self.status.reset();
+                        }
+                    }
 
                     // ... messages that leaked before self.status.reset() may still be queued
                     // (cleanup leaked messages)
@@ -151,8 +154,10 @@ pub const Client = struct {
                 var num_attempts: usize = 0;
                 var last_err: ConnectError = undefined;
                 while (true) : (num_attempts += 1) {
-                    const was_cancelled = if (self.status.get()) |status| status == .closed else false;
-                    if (was_cancelled) return error.Cancelled;
+                    if (self.status.get()) |status| {
+                        if (status != .closed) unreachable;
+                        return error.Cancelled;
+                    }
 
                     if (num_attempts == 10) {
                         if (self.status.set()) {
@@ -267,31 +272,27 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
-        {
-            const held = self.lock.acquire();
-            defer held.release();
-
-            for (self.pool[0..self.pos]) |conn, i| {
-                log.info("closing [{d}] {}", .{ i, self.address });
-
-                // TODO(kenta): below should be cleaned up
-
-                // if reconnecting, cancel and continue
-                // else,            cancel and shutdown socket
-
-                const status = conn.status.get();
-                const not_alive = status == null or status.? != .connected;
-
-                conn.status.reset();
-                if (conn.status.set()) conn.status.commit(.closed);
-                if (not_alive) continue;
-
-                conn.socket.shutdown(.both) catch {};
-            }
-        }
-
+        self.close();
         self.wga.wait();
         allocator.destroy(@ptrCast(*const [capacity]*Connection, self.pool));
+    }
+
+    fn close(self: *Self) void {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        for (self.pool[0..self.pos]) |conn, i| {
+            log.info("closing [{d}] {}", .{ i, self.address });
+
+            const status = conn.status.get();
+            const connected = status != null and status.? == .connected;
+
+            conn.status.reset();
+            if (conn.status.set()) conn.status.commit(.closed);
+            if (!connected) continue;
+
+            conn.socket.shutdown(.both) catch {};
+        }
     }
 
     fn connect(self: *Self, reactor: Reactor) !*Connection {
