@@ -19,7 +19,7 @@ pub const log_level = .debug;
 
 var stopped: bool = false;
 
-var mpsc_node_pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undefined;
+var mpsc_node_pool: hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096) = undefined;
 
 // get_client()
 //      if (pooling strategy wants to create new connection)
@@ -65,7 +65,7 @@ pub const Client = struct {
         client: *Self,
         socket: AsyncSocket,
         frame: @Frame(Connection.start),
-        queue: mpsc.AsyncSink([]const u8),
+        queue: mpsc.AsyncQueue([]const u8),
         status: oneshot.Channel(ConnectionStatus),
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
@@ -93,7 +93,7 @@ pub const Client = struct {
                 const Cases = struct {
                     write: struct {
                         run: Case(Connection.writeLoop),
-                        cancel: Case(mpsc.AsyncSink([]const u8).cancel),
+                        cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
                     },
                     read: struct {
                         run: Case(Connection.readLoop),
@@ -105,7 +105,7 @@ pub const Client = struct {
                     Cases{
                         .write = .{
                             .run = call(Connection.writeLoop, .{self}),
-                            .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
+                            .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
                         },
                         .read = .{
                             .run = call(Connection.readLoop, .{self}),
@@ -196,8 +196,8 @@ pub const Client = struct {
         }
 
         pub fn cleanup(self: *Connection) void {
-            var first: *mpsc.Sink([]const u8).Node = undefined;
-            var last: *mpsc.Sink([]const u8).Node = undefined;
+            var first: *mpsc.Queue([]const u8).Node = undefined;
+            var last: *mpsc.Queue([]const u8).Node = undefined;
 
             var num_items = self.queue.tryPopBatch(&first, &last);
             while (num_items > 0) : (num_items -= 1) {
@@ -208,8 +208,8 @@ pub const Client = struct {
         }
 
         pub fn writeLoop(self: *Connection) !void {
-            var first: *mpsc.Sink([]const u8).Node = undefined;
-            var last: *mpsc.Sink([]const u8).Node = undefined;
+            var first: *mpsc.Queue([]const u8).Node = undefined;
+            var last: *mpsc.Queue([]const u8).Node = undefined;
 
             while (true) {
                 const num_items = self.queue.popBatch(&first, &last);
@@ -344,11 +344,11 @@ pub const Client = struct {
                 }
 
                 var min_conn = pool[0];
-                var min_pending: usize = 0; // pending queued writes
+                var min_pending: usize = min_conn.queue.peek(); // pending queued writes
                 if (min_pending == 0) break :connect min_conn;
 
                 for (pool[1..]) |conn| {
-                    const pending: usize = 0; // pending queued writes
+                    const pending: usize = conn.queue.peek(); // pending queued writes
                     if (pending == 0) break :connect conn;
                     if (pending < min_pending) {
                         min_conn = conn;
@@ -511,7 +511,7 @@ pub fn main() !void {
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
 
-    mpsc_node_pool = try hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096).init(hyperia.allocator);
+    mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);
 
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
