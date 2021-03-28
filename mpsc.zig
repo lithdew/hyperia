@@ -263,7 +263,7 @@ pub fn Queue(comptime T: type) type {
         }
 
         pub fn tryPush(self: *Self, src: *Node) void {
-            assert(@atomicRmw(usize, &self.count, .Add, 1, .Release) >= 0);
+            assert(@atomicRmw(usize, &self.count, .Add, 1, .Monotonic) >= 0);
 
             src.next = null;
             const old_back = @atomicRmw(?*Node, &self.back, .Xchg, src, .AcqRel) orelse &self.front;
@@ -271,7 +271,7 @@ pub fn Queue(comptime T: type) type {
         }
 
         pub fn tryPushBatch(self: *Self, first: *Node, last: *Node, count: usize) void {
-            assert(@atomicRmw(usize, &self.count, .Add, count, .Release) >= 0);
+            assert(@atomicRmw(usize, &self.count, .Add, count, .Monotonic) >= 0);
 
             last.next = null;
             const old_back = @atomicRmw(?*Node, &self.back, .Xchg, last, .AcqRel) orelse &self.front;
