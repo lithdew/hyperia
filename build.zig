@@ -33,8 +33,10 @@ pub fn build(b: *Builder) void {
 
     const test_step = b.step("test", "Run library tests.");
     const test_filter = b.option([]const u8, "test-filter", "Test filter");
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     const file = b.addTest("hyperia.zig");
+    file.sanitize_thread = sanitize_thread;
     file.setTarget(target);
     file.setBuildMode(mode);
     register(file);
@@ -53,6 +55,7 @@ pub fn build(b: *Builder) void {
         const example_step = b.step(example_name, "Example " ++ example_name ++ ".zig");
 
         const exe = b.addExecutable(example_name, example_name ++ ".zig");
+        exe.sanitize_thread = sanitize_thread;
         exe.setTarget(target);
         exe.setBuildMode(mode);
         register(exe);
