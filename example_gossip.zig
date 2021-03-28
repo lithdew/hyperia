@@ -20,35 +20,7 @@ pub const log_level = .debug;
 var stopped: bool = false;
 
 var mpsc_node_pool: hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096) = undefined;
-
-// get_client()
-//      if (pooling strategy wants to create new connection)
-//          return connect()
-//      return existing_connection
-
-// connect()
-//      if (client connected before s.t. connection being retried)
-//          oneshot channel wait
-//          return oneshot channel result (connection or error)
-//      status = connect()
-//      if (status == fail)
-//          return status.error
-//      spawn client()
-//      return connection
-
-// client()
-//      while (true)
-//          spawn read and write workers
-//          wait until either read or write worker closes
-//          cleanup pending messages/requests/etc.
-//          if (is_last_connection_in_pool)
-//              while (true) : (reconnection_attempt += 1)
-//                  status = connect()
-//                  if (status == success)
-//                      break
-//                  if (reconnection_attempt >= max_attempts)
-//                      report to oneshot channel
-//                      return
+var mpsc_sink_pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undefined;
 
 pub const Client = struct {
     const Self = @This();
@@ -131,6 +103,7 @@ pub const Client = struct {
 
                     // ... messages that leaked before self.status.reset() may still be queued
                     // (cleanup leaked messages)
+
                     self.cleanup();
                     self.socket.deinit();
 
@@ -380,7 +353,102 @@ pub const Client = struct {
 };
 
 pub const Node = struct {
-    pub const Connection = struct {};
+    pub const Connection = struct {
+        node: *Node,
+        socket: AsyncSocket,
+        address: net.Address,
+        frame: @Frame(Connection.start),
+        queue: mpsc.AsyncSink([]const u8) = .{},
+
+        pub fn start(self: *Connection) !void {
+            defer {
+                log.info("{} has disconnected", .{self.address});
+                if (self.node.deregister(self.address)) {
+                    suspend {
+                        self.cleanup();
+                        self.socket.deinit();
+                        self.node.wga.allocator.destroy(self);
+                    }
+                }
+            }
+
+            const Cases = struct {
+                write: struct {
+                    run: Case(Connection.writeLoop),
+                    cancel: Case(mpsc.AsyncSink([]const u8).cancel),
+                },
+                read: struct {
+                    run: Case(Connection.readLoop),
+                    cancel: Case(AsyncSocket.cancel),
+                },
+            };
+
+            switch (select(
+                Cases{
+                    .write = .{
+                        .run = call(Connection.writeLoop, .{self}),
+                        .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
+                    },
+                    .read = .{
+                        .run = call(Connection.readLoop, .{self}),
+                        .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
+                    },
+                },
+            )) {
+                .write => |result| return result,
+                .read => |result| return result,
+            }
+        }
+
+        pub fn cleanup(self: *Connection) void {
+            var first: *mpsc.Sink([]const u8).Node = undefined;
+            var last: *mpsc.Sink([]const u8).Node = undefined;
+
+            var num_items = self.queue.tryPopBatch(&first, &last);
+            while (num_items > 0) : (num_items -= 1) {
+                const next = first.next;
+                mpsc_sink_pool.release(hyperia.allocator, first);
+                first = next orelse continue;
+            }
+        }
+
+        pub fn writeLoop(self: *Connection) !void {
+            var first: *mpsc.Sink([]const u8).Node = undefined;
+            var last: *mpsc.Sink([]const u8).Node = undefined;
+
+            while (true) {
+                const num_items = self.queue.popBatch(&first, &last);
+                if (num_items == 0) return;
+
+                var i: usize = 0;
+                errdefer while (i < num_items) : (i += 1) {
+                    const next = first.next;
+                    mpsc_sink_pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+                };
+
+                while (i < num_items) : (i += 1) {
+                    var index: usize = 0;
+                    while (index < first.value.len) {
+                        index += try self.socket.send(first.value[index..], os.MSG_NOSIGNAL);
+                    }
+
+                    const next = first.next;
+                    mpsc_sink_pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+                }
+            }
+        }
+
+        pub fn readLoop(self: *Connection) !void {
+            var buf: [1024]u8 = undefined;
+
+            while (true) {
+                const num_bytes = try self.socket.recv(&buf, os.MSG_NOSIGNAL);
+                if (num_bytes == 0) return;
+            }
+        }
+    };
 
     listener: AsyncSocket,
 
@@ -422,31 +490,30 @@ pub const Node = struct {
     fn accept(self: *Node, allocator: *mem.Allocator, reactor: Reactor) !void {
         while (true) {
             var conn = try self.listener.accept(os.SOCK_CLOEXEC | os.SOCK_NONBLOCK);
-            // errdefer conn.socket.deinit();
-            defer conn.socket.deinit();
+            errdefer conn.socket.deinit();
 
             log.info("got connection: {}", .{conn.address});
 
             const wga_allocator = &self.wga.allocator;
 
-            // const connection = try wga_allocator.create(Connection);
-            // errdefer wga_allocator.destroy(connection);
+            const connection = try wga_allocator.create(Connection);
+            errdefer wga_allocator.destroy(connection);
 
-            // connection.server = self;
-            // connection.socket = AsyncSocket.from(conn.socket);
-            // connection.address = conn.address;
-            // connection.queue = .{};
+            connection.server = self;
+            connection.socket = AsyncSocket.from(conn.socket);
+            connection.address = conn.address;
+            connection.queue = .{};
 
-            // try reactor.add(conn.socket.fd, &connection.socket.handle, .{ .readable = true, .writable = true });
+            try reactor.add(conn.socket.fd, &connection.socket.handle, .{ .readable = true, .writable = true });
 
-            // {
-            //     const held = self.lock.acquire();
-            //     defer held.release();
+            {
+                const held = self.lock.acquire();
+                defer held.release();
 
-            //     try self.connections.put(allocator, connection.address.any, connection);
-            // }
+                try self.connections.put(allocator, connection.address.any, connection);
+            }
 
-            // connection.frame = async connection.start();
+            connection.frame = async connection.start();
         }
     }
 
@@ -513,6 +580,9 @@ pub fn main() !void {
 
     mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);
+
+    mpsc_sink_pool = try hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096).init(hyperia.allocator);
+    defer mpsc_sink_pool.deinit(hyperia.allocator);
 
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
