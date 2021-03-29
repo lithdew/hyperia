@@ -9,6 +9,7 @@ const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
 const io = std.io;
 const os = std.os;
+const fmt = std.fmt;
 const net = std.net;
 const mem = std.mem;
 const mpsc = hyperia.mpsc;
@@ -583,12 +584,14 @@ pub const Node = struct {
     }
 };
 
-pub fn runExample(reactor: Reactor, node: *Node) !void {
-    try node.write(hyperia.allocator, reactor, net.Address.initIp4(.{ 0, 0, 0, 0 }, 9001), "initial message\n");
+pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
+    for (options.peer_addresses) |peer_address| {
+        try node.write(hyperia.allocator, reactor, peer_address, "initial message\n");
+    }
     suspend;
 }
 
-pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
+pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
     defer {
         @atomicStore(bool, &stopped, true, .Release);
         reactor_event.post();
@@ -621,7 +624,7 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
                 .cancel = call(Node.close, .{&node}),
             },
             .example = .{
-                .run = call(runExample, .{ reactor, &node }),
+                .run = call(runExample, .{ options, reactor, &node }),
             },
             .ctrl_c = .{
                 .run = call(hyperia.ctrl_c.wait, .{}),
@@ -640,6 +643,58 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
             return result;
         },
     }
+}
+
+pub const Options = struct {
+    listen_address: net.Address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000),
+    peer_addresses: []net.Address = &[_]net.Address{},
+
+    pub fn deinit(self: Options, allocator: *mem.Allocator) void {
+        allocator.free(self.peer_addresses);
+    }
+};
+
+pub fn parseAddress(buf: []const u8) !net.Address {
+    var j: usize = 0;
+    var k: usize = 0;
+
+    const i = mem.lastIndexOfScalar(u8, buf, ':') orelse {
+        const port = fmt.parseInt(u16, buf, 10) catch return error.MissingPort;
+        return net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+    };
+
+    const host = parse: {
+        if (buf[0] == '[') {
+            const end = mem.indexOfScalar(u8, buf, ']') orelse return error.MissingEndBracket;
+            if (end + 1 == i) {} else if (end + 1 == buf.len) {
+                return error.MissingRightBracket;
+            } else {
+                return error.MissingPort;
+            }
+
+            j = 1;
+            k = end + 1;
+            break :parse buf[1..end];
+        }
+
+        if (mem.indexOfScalar(u8, buf[0..i], ':') != null) {
+            return error.TooManyColons;
+        }
+        break :parse buf[0..i];
+    };
+
+    if (mem.indexOfScalar(u8, buf[j..], '[') != null) {
+        return error.UnexpectedLeftBracket;
+    }
+
+    if (mem.indexOfScalar(u8, buf[k..], ']') != null) {
+        return error.UnexpectedRightBracket;
+    }
+
+    const port = fmt.parseInt(u16, buf[i + 1 ..], 10) catch return error.BadPort;
+    if (host.len == 0) return net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+
+    return try net.Address.parseIp(host, port);
 }
 
 pub fn main() !void {
@@ -663,7 +718,22 @@ pub fn main() !void {
     };
     defer args.deinit();
 
-    log.info("args positionals: {s}", .{args.positionals()});
+    var options: Options = .{};
+    defer options.deinit(hyperia.allocator);
+
+    options.peer_addresses = parse: {
+        var peer_addresses = try std.ArrayList(net.Address).initCapacity(hyperia.allocator, args.positionals().len);
+        errdefer peer_addresses.deinit();
+
+        for (args.positionals()) |raw_peer_address| {
+            const peer_address = try parseAddress(raw_peer_address);
+            peer_addresses.appendAssumeCapacity(peer_address);
+
+            log.info("got peer address: {}", .{peer_address});
+        }
+
+        break :parse peer_addresses.toOwnedSlice();
+    };
 
     mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);
@@ -679,7 +749,7 @@ pub fn main() !void {
 
     try reactor.add(reactor_event.fd, &reactor_event.handle, .{});
 
-    var frame = async runApp(reactor, &reactor_event);
+    var frame = async runApp(options, reactor, &reactor_event);
 
     while (!@atomicLoad(bool, &stopped, .Acquire)) {
         const EventProcessor = struct {
