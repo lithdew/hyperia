@@ -10,3 +10,6 @@
 [submodule "ed25519_donna/lib"]
 	path = ed25519_donna/lib
 	url = https://github.com/floodyberry/ed25519-donna.git
+[submodule "clap"]
+	path = clap
+	url = https://github.com/Hejsil/zig-clap

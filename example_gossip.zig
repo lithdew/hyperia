@@ -1,11 +1,13 @@
 const std = @import("std");
 const zap = @import("zap");
+const clap = @import("clap");
 const hyperia = @import("hyperia");
 
 const Reactor = hyperia.Reactor;
 const AsyncSocket = hyperia.AsyncSocket;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
+const io = std.io;
 const os = std.os;
 const net = std.net;
 const mem = std.mem;
@@ -587,10 +589,21 @@ pub fn main() !void {
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
 
-    const args = try process.argsAlloc(hyperia.allocator);
-    defer process.argsFree(hyperia.allocator, args);
+    const params = comptime [_]clap.Param(clap.Help){
+        clap.parseParam("-h, --help   Display this help and exit.                ") catch unreachable,
+        clap.parseParam("-l, --listen Port to listen for incoming connections on.") catch unreachable,
+        clap.parseParam("<POS>...") catch unreachable,
+    };
 
-    log.info("args: {s}", .{args[1..]});
+    var diagnostic: clap.Diagnostic = undefined;
+
+    var args = clap.parse(clap.Help, &params, hyperia.allocator, &diagnostic) catch |err| {
+        diagnostic.report(io.getStdErr().writer(), err) catch {};
+        return err;
+    };
+    defer args.deinit();
+
+    log.info("args positionals: {s}", .{args.positionals()});
 
     mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);

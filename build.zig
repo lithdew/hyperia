@@ -8,6 +8,11 @@ pub const pkgs = struct {
         .path = "zap/src/zap.zig",
     };
 
+    pub const clap = Pkg{
+        .name = "clap",
+        .path = "clap/clap.zig",
+    };
+
     pub const hyperia = Pkg{
         .name = "hyperia",
         .path = "hyperia.zig",
@@ -21,6 +26,7 @@ pub fn register(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
 
     step.addPackage(pkgs.zap);
+    step.addPackage(pkgs.clap);
     step.addPackage(pkgs.hyperia);
 
     @import("picohttp/picohttp.zig").addTo(step, "picohttp");
