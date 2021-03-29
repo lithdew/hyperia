@@ -158,7 +158,7 @@ pub const AsyncSocket = struct {
 
     pub const SendError = os.SendError || Error;
 
-    pub fn send(self: *Self, buf: []const u8, flags: u32) SendError!usize {
+    pub fn send(self: *Self, buf: []const u8, flags: u32) callconv(.Async) SendError!usize {
         while (true) {
             const num_bytes = self.trySend(buf, flags) catch |err| switch (err) {
                 error.WouldBlock => {

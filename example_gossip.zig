@@ -89,8 +89,16 @@ pub const Client = struct {
                         },
                     },
                 )) {
-                    .write => |result| {},
-                    .read => |result| {},
+                    .write => |result| {
+                        if (result) {} else |err| {
+                            log.warn("write error: {}", .{err});
+                        }
+                    },
+                    .read => |result| {
+                        if (result) {} else |err| {
+                            log.warn("read error: {}", .{err});
+                        }
+                    },
                 }
 
                 const is_last_connection = check: {
@@ -187,7 +195,6 @@ pub const Client = struct {
         pub fn writeLoop(self: *Connection) !void {
             var first: *mpsc.Queue([]const u8).Node = undefined;
             var last: *mpsc.Queue([]const u8).Node = undefined;
-
             while (true) {
                 const num_items = self.queue.popBatch(&first, &last);
                 if (num_items == 0) return;
@@ -202,7 +209,13 @@ pub const Client = struct {
                 while (i < num_items) : (i += 1) {
                     var index: usize = 0;
                     while (index < first.value.len) {
-                        index += try self.socket.send(first.value[index..], os.MSG_NOSIGNAL);
+                        const num_bytes = await async self.socket.send(first.value[index..], os.MSG_NOSIGNAL) catch |err| switch (err) {
+                            error.ConnectionResetByPeer => return,
+                            error.BrokenPipe => return,
+                            else => return err,
+                        };
+
+                        index += num_bytes;
                     }
 
                     const next = first.next;
@@ -215,7 +228,10 @@ pub const Client = struct {
         pub fn readLoop(self: *Connection) !void {
             var buf: [4096]u8 = undefined;
             while (true) {
-                const num_bytes = try self.socket.read(&buf);
+                const num_bytes = self.socket.recv(&buf, os.MSG_NOSIGNAL) catch |err| switch (err) {
+                    error.ConnectionResetByPeer => return,
+                    else => return err,
+                };
                 if (num_bytes == 0) return;
 
                 const message = mem.trim(u8, buf[0..num_bytes], "\r\n");
@@ -313,7 +329,9 @@ pub const Client = struct {
 
     pub fn acquire(self: *Self, reactor: Reactor) !*Connection {
         while (true) {
-            const pooled_conn: *Connection = connect: {
+            const Result = std.meta.Tuple(&[_]type{ usize, *Connection });
+
+            const result = connect: {
                 const held = self.lock.acquire();
                 defer held.release();
 
@@ -323,16 +341,16 @@ pub const Client = struct {
 
                 const pool = self.pool[0..self.pos];
                 if (pool.len == 0) {
-                    break :connect try self.connect(reactor);
+                    break :connect Result{ .@"0" = pool.len, .@"1" = try self.connect(reactor) };
                 }
 
                 var min_conn = pool[0];
                 var min_pending: usize = min_conn.queue.peek();
-                if (min_pending == 0) break :connect min_conn;
+                if (min_pending == 0) break :connect Result{ .@"0" = pool.len, .@"1" = min_conn };
 
                 for (pool[1..]) |conn| {
                     const pending: usize = conn.queue.peek();
-                    if (pending == 0) break :connect conn;
+                    if (pending == 0) break :connect Result{ .@"0" = pool.len, .@"1" = conn };
                     if (pending < min_pending) {
                         min_conn = conn;
                         min_pending = pending;
@@ -340,19 +358,19 @@ pub const Client = struct {
                 }
 
                 if (pool.len < capacity) {
-                    break :connect try self.connect(reactor);
+                    break :connect Result{ .@"0" = pool.len, .@"1" = try self.connect(reactor) };
                 }
 
-                break :connect min_conn;
+                break :connect Result{ .@"0" = pool.len, .@"1" = min_conn };
             };
 
-            switch (pooled_conn.status.wait()) {
+            switch (result[1].status.wait()) {
                 .failed => |err| return err,
                 .closed => continue,
                 else => {},
             }
 
-            return pooled_conn;
+            return result[1];
         }
     }
 
@@ -563,9 +581,7 @@ pub const Node = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        try self.clients.ensureCapacity(allocator, self.clients.capacity() + 1);
-
-        const result = self.clients.getOrPutAssumeCapacity(address.any);
+        const result = try self.clients.getOrPut(allocator, address.any);
         errdefer self.clients.removeAssertDiscard(address.any);
 
         if (!result.found_existing) {
@@ -586,7 +602,10 @@ pub const Node = struct {
 
 pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
     for (options.peer_addresses) |peer_address| {
-        try node.write(hyperia.allocator, reactor, peer_address, "initial message\n");
+        var i: usize = 0;
+        while (true) {
+            try node.write(hyperia.allocator, reactor, peer_address, "initial message\n");
+        }
     }
     suspend;
 }
