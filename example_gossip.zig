@@ -251,12 +251,11 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
-        self.close();
         self.wga.wait();
         allocator.destroy(@ptrCast(*const [capacity]*Connection, self.pool));
     }
 
-    fn close(self: *Self) void {
+    pub fn close(self: *Self) void {
         const held = self.lock.acquire();
         defer held.release();
 
@@ -464,7 +463,7 @@ pub const Node = struct {
 
     wga: AsyncWaitGroupAllocator,
     lock: std.Thread.Mutex = .{},
-    clients: std.AutoArrayHashMap(os.sockaddr, *Client) = .{},
+    clients: std.AutoArrayHashMapUnmanaged(os.sockaddr, *Client) = .{},
     connections: std.AutoArrayHashMapUnmanaged(os.sockaddr, *Connection) = .{},
 
     pub fn init(allocator: *mem.Allocator) Node {
@@ -472,13 +471,36 @@ pub const Node = struct {
     }
 
     pub fn deinit(self: *Node, allocator: *mem.Allocator) void {
+        var clients: []*Client = undefined;
+        defer allocator.free(clients);
+
         {
             const held = self.lock.acquire();
             defer held.release();
+
+            for (self.connections.items()) |entry| {
+                log.info("closing incoming connection {}", .{entry.value.address});
+                entry.value.socket.shutdown(.both) catch {};
+            }
+
+            clients = allocator.alloc(*Client, self.clients.count()) catch unreachable;
+
+            for (self.clients.items()) |entry, i| {
+                log.info("closing outgoing connection {}", .{entry.value.address});
+                clients[i] = entry.value;
+                entry.value.close();
+            }
         }
 
         self.wga.wait();
         self.connections.deinit(allocator);
+
+        for (clients) |client| {
+            client.deinit(allocator);
+            allocator.destroy(client);
+        }
+
+        self.clients.deinit(allocator);
     }
 
     pub fn close(self: *Node) void {
@@ -510,7 +532,7 @@ pub const Node = struct {
             const connection = try wga_allocator.create(Connection);
             errdefer wga_allocator.destroy(connection);
 
-            connection.server = self;
+            connection.node = self;
             connection.socket = AsyncSocket.from(conn.socket);
             connection.address = conn.address;
             connection.queue = .{};
@@ -528,17 +550,41 @@ pub const Node = struct {
         }
     }
 
-    fn deregister(self: *Server, address: net.Address) bool {
+    fn deregister(self: *Node, address: net.Address) bool {
         const held = self.lock.acquire();
         defer held.release();
 
         const entry = self.connections.swapRemove(address.any) orelse return false;
         return true;
     }
+
+    fn acquire(self: *Node, allocator: *mem.Allocator, address: net.Address) !*Client {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        try self.clients.ensureCapacity(allocator, self.clients.capacity() + 1);
+
+        const result = self.clients.getOrPutAssumeCapacity(address.any);
+        errdefer self.clients.removeAssertDiscard(address.any);
+
+        if (!result.found_existing) {
+            result.entry.value = try allocator.create(Client);
+            errdefer allocator.destroy(result.entry.value);
+
+            result.entry.value.* = try Client.init(allocator, address);
+        }
+
+        return result.entry.value;
+    }
+
+    pub fn write(self: *Node, allocator: *mem.Allocator, reactor: Reactor, address: net.Address, buf: []const u8) !void {
+        const client = try self.acquire(allocator, address);
+        try client.write(reactor, buf);
+    }
 };
 
-pub fn runClient(reactor: Reactor, client: *Client) !void {
-    try client.write(reactor, "initial message\n");
+pub fn runExample(reactor: Reactor, node: *Node) !void {
+    try node.write(hyperia.allocator, reactor, net.Address.initIp4(.{ 0, 0, 0, 0 }, 9001), "initial message\n");
     suspend;
 }
 
@@ -548,14 +594,19 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
         reactor_event.post();
     }
 
-    const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
+    var node = Node.init(hyperia.allocator);
+    defer node.deinit(hyperia.allocator);
 
-    var client = try Client.init(hyperia.allocator, address);
-    defer client.deinit(hyperia.allocator);
+    const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
+    try node.start(reactor, address);
 
     const Cases = struct {
-        client: struct {
-            run: Case(runClient),
+        node: struct {
+            run: Case(Node.accept),
+            cancel: Case(Node.close),
+        },
+        example: struct {
+            run: Case(runExample),
         },
         ctrl_c: struct {
             run: Case(hyperia.ctrl_c.wait),
@@ -565,8 +616,12 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
 
     switch (select(
         Cases{
-            .client = .{
-                .run = call(runClient, .{ reactor, &client }),
+            .node = .{
+                .run = call(Node.accept, .{ &node, hyperia.allocator, reactor }),
+                .cancel = call(Node.close, .{&node}),
+            },
+            .example = .{
+                .run = call(runExample, .{ reactor, &node }),
             },
             .ctrl_c = .{
                 .run = call(hyperia.ctrl_c.wait, .{}),
@@ -574,7 +629,12 @@ pub fn runApp(reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
             },
         },
     )) {
-        .client => |result| return result,
+        .node => |result| {
+            return result;
+        },
+        .example => |result| {
+            return result;
+        },
         .ctrl_c => |result| {
             log.info("shutting down...", .{});
             return result;
