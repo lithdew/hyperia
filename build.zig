@@ -62,9 +62,7 @@ pub fn build(b: *Builder) void {
         exe.install();
 
         const exe_run = exe.run();
-        if (b.args != null) {
-            exe_run.addArgs(b.args.?);
-        }
+        if (b.args) |args| exe_run.addArgs(args);
 
         example_step.dependOn(&exe_run.step);
     }

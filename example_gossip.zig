@@ -10,6 +10,7 @@ const os = std.os;
 const net = std.net;
 const mem = std.mem;
 const mpsc = hyperia.mpsc;
+const process = std.process;
 const oneshot = hyperia.oneshot;
 const log = std.log.scoped(.gossip);
 
@@ -231,6 +232,7 @@ pub const Client = struct {
     pub const capacity = 4;
 
     lock: std.Thread.Mutex = .{},
+    closed: bool = false,
 
     pool: [*]*Connection,
     pos: usize = 0,
@@ -255,6 +257,8 @@ pub const Client = struct {
     fn close(self: *Self) void {
         const held = self.lock.acquire();
         defer held.release();
+
+        self.closed = true;
 
         for (self.pool[0..self.pos]) |conn, i| {
             log.info("closing [{d}] {}", .{ i, self.address });
@@ -311,17 +315,21 @@ pub const Client = struct {
                 const held = self.lock.acquire();
                 defer held.release();
 
+                if (self.closed) {
+                    return error.Closed;
+                }
+
                 const pool = self.pool[0..self.pos];
                 if (pool.len == 0) {
                     break :connect try self.connect(reactor);
                 }
 
                 var min_conn = pool[0];
-                var min_pending: usize = min_conn.queue.peek(); // pending queued writes
+                var min_pending: usize = min_conn.queue.peek();
                 if (min_pending == 0) break :connect min_conn;
 
                 for (pool[1..]) |conn| {
-                    const pending: usize = conn.queue.peek(); // pending queued writes
+                    const pending: usize = conn.queue.peek();
                     if (pending == 0) break :connect conn;
                     if (pending < min_pending) {
                         min_conn = conn;
@@ -454,6 +462,7 @@ pub const Node = struct {
 
     wga: AsyncWaitGroupAllocator,
     lock: std.Thread.Mutex = .{},
+    clients: std.AutoArrayHashMap(os.sockaddr, *Client) = .{},
     connections: std.AutoArrayHashMapUnmanaged(os.sockaddr, *Connection) = .{},
 
     pub fn init(allocator: *mem.Allocator) Node {
@@ -577,6 +586,11 @@ pub fn main() !void {
 
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
+
+    const args = try process.argsAlloc(hyperia.allocator);
+    defer process.argsFree(hyperia.allocator, args);
+
+    log.info("args: {s}", .{args[1..]});
 
     mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);
