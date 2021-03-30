@@ -26,138 +26,238 @@ var stopped: bool = false;
 var mpsc_node_pool: hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096) = undefined;
 var mpsc_sink_pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undefined;
 
+const Frame = struct {
+    runnable: zap.Pool.Runnable = .{ .runFn = run },
+    frame: anyframe,
+
+    pub fn run(runnable: *zap.Pool.Runnable) void {
+        const self = @fieldParentPtr(@This(), "runnable", runnable);
+        resume self.frame;
+    }
+};
+
 pub const Client = struct {
     const Self = @This();
 
-    pub const ConnectError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
+    pub const ConnectionError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError || error{ Closed, Retry };
 
     pub const ConnectionStatus = union(enum) {
+        not_connected: void,
         connected: void,
-        closed: void,
-        failed: ConnectError,
     };
 
     pub const Connection = struct {
+        pub const Waiter = struct {
+            runnable: zap.Pool.Runnable = .{ .runFn = run },
+            frame: anyframe,
+            next: ?*@This() = null,
+            result: ConnectionError!void = undefined,
+
+            pub fn run(runnable: *zap.Pool.Runnable) void {
+                const self = @fieldParentPtr(@This(), "runnable", runnable);
+                resume self.frame;
+            }
+        };
+
         client: *Self,
         socket: AsyncSocket,
         frame: @Frame(Connection.start),
         queue: mpsc.AsyncQueue([]const u8),
-        status: oneshot.Channel(ConnectionStatus),
+
+        status: ConnectionStatus = .not_connected,
+        waiters: ?*Waiter = null,
+
+        pub fn mayConnect(self: *Connection) bool {
+            const held = self.client.lock.acquire();
+            defer held.release();
+
+            if (self.client.closed) {
+                self.client.release(self);
+
+                var batch: zap.Pool.Batch = .{};
+                defer hyperia.pool.schedule(.{}, batch);
+
+                while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                    waiter.result = error.Closed;
+                    batch.push(&waiter.runnable);
+                }
+
+                return false;
+            }
+
+            if (self.status == .connected) {
+                unreachable;
+            }
+
+            return true;
+        }
+
+        pub fn reportError(self: *Connection, err: ConnectionError) void {
+            const held = self.client.lock.acquire();
+            defer held.release();
+
+            switch (self.status) {
+                .not_connected => {
+                    self.client.release(self);
+
+                    var batch: zap.Pool.Batch = .{};
+                    defer hyperia.pool.schedule(.{}, batch);
+
+                    while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                        waiter.result = err;
+                        batch.push(&waiter.runnable);
+                    }
+                },
+                .connected => unreachable,
+            }
+        }
+
+        pub fn reportConnected(self: *Connection) bool {
+            const held = self.client.lock.acquire();
+            defer held.release();
+
+            if (self.client.closed) {
+                self.client.release(self);
+
+                var batch: zap.Pool.Batch = .{};
+                defer hyperia.pool.schedule(.{}, batch);
+
+                while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                    waiter.result = error.Closed;
+                    batch.push(&waiter.runnable);
+                }
+
+                return false;
+            }
+
+            if (self.status == .connected) {
+                unreachable;
+            }
+
+            self.status = .connected;
+
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
+
+            while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                waiter.result = {};
+                batch.push(&waiter.runnable);
+            }
+
+            return true;
+        }
+
+        pub fn mayReconnect(self: *Connection) bool {
+            const held = self.client.lock.acquire();
+            defer held.release();
+
+            if (self.client.closed) {
+                self.client.release(self);
+
+                var batch: zap.Pool.Batch = .{};
+                defer hyperia.pool.schedule(.{}, batch);
+
+                while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                    waiter.result = error.Closed;
+                    batch.push(&waiter.runnable);
+                }
+
+                return false;
+            }
+
+            if (self.status == .connected) {
+                if (self.client.pos > 1) {
+                    self.client.release(self);
+
+                    var batch: zap.Pool.Batch = .{};
+                    defer hyperia.pool.schedule(.{}, batch);
+
+                    while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                        waiter.result = error.Retry;
+                        batch.push(&waiter.runnable);
+                    }
+
+                    return false;
+                }
+
+                self.status = .not_connected;
+                self.socket.deinit();
+            }
+
+            return true;
+        }
+
+        pub fn work(self: *Connection) void {
+            const Cases = struct {
+                write: struct {
+                    run: Case(Connection.writeLoop),
+                    cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
+                },
+                read: struct {
+                    run: Case(Connection.readLoop),
+                    cancel: Case(AsyncSocket.cancel),
+                },
+            };
+
+            switch (select(
+                Cases{
+                    .write = .{
+                        .run = call(Connection.writeLoop, .{self}),
+                        .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
+                    },
+                    .read = .{
+                        .run = call(Connection.readLoop, .{self}),
+                        .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
+                    },
+                },
+            )) {
+                .write => |result| {
+                    if (result) {} else |err| {
+                        log.warn("write error: {}", .{err});
+                    }
+                },
+                .read => |result| {
+                    if (result) {} else |err| {
+                        log.warn("read error: {}", .{err});
+                    }
+                },
+            }
+        }
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
-            if (self.status.set()) {
-                self.connect(reactor) catch |err| {
-                    self.status.commit(.{ .failed = err });
+            var frame: Frame = .{ .frame = @frame() };
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
 
-                    self.client.release(self);
-                    suspend {
-                        self.cleanup();
-                        self.client.wga.allocator.destroy(self);
-                    }
-                };
-
-                self.status.commit(.connected);
-            } else {
-                self.client.release(self);
+            defer {
                 suspend {
                     self.cleanup();
                     self.client.wga.allocator.destroy(self);
                 }
             }
 
-            _ = @atomicRmw(usize, &self.client.live, .Add, 1, .AcqRel);
+            if (!self.mayConnect()) return;
+
+            self.connect(reactor) catch |err| {
+                self.reportError(err);
+                return;
+            };
+
+            if (!self.reportConnected()) return;
 
             while (true) {
-                const Cases = struct {
-                    write: struct {
-                        run: Case(Connection.writeLoop),
-                        cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
-                    },
-                    read: struct {
-                        run: Case(Connection.readLoop),
-                        cancel: Case(AsyncSocket.cancel),
-                    },
-                };
-
-                switch (select(
-                    Cases{
-                        .write = .{
-                            .run = call(Connection.writeLoop, .{self}),
-                            .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
-                        },
-                        .read = .{
-                            .run = call(Connection.readLoop, .{self}),
-                            .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
-                        },
-                    },
-                )) {
-                    .write => |result| {
-                        if (result) {} else |err| {
-                            log.warn("write error: {}", .{err});
-                        }
-                    },
-                    .read => |result| {
-                        if (result) {} else |err| {
-                            log.warn("read error: {}", .{err});
-                        }
-                    },
-                }
-
-                if (self.status.get()) |status| {
-                    if (status != .closed) {
-                        self.status.reset();
-                        self.socket.deinit();
-                    }
-                } else {
-                    self.socket.deinit();
-                }
-
-                self.cleanup();
-
-                const is_last_connection = @atomicRmw(usize, &self.client.live, .Sub, 1, .AcqRel) == 1;
-                log.info("is last connection? {}", .{is_last_connection});
-
-                // if we are the last client in the pool, retry
-                // - if successful,   self.status.set(error.RetryAcquiringConnection) (let acquire() waiters retry and acquire this connection)
-                // - if unsuccessful, self.status.set(last_connection_error); (let acquire() waiters fail stating we tried our best but couldn't acquire a connection)
-                // else
-                // - self.status.set(error.RetryAcquiringConnection) (let acquire() waiters find another available connection)
-
-                if (!is_last_connection) {
-                    if (self.status.set()) {
-                        self.status.commit(.closed);
-                    }
-
-                    self.client.release(self);
-                    suspend {
-                        self.cleanup();
-                        self.client.wga.allocator.destroy(self);
-                    }
-                }
+                self.work();
 
                 var num_attempts: usize = 0;
-                var last_err: ConnectError = undefined;
-                while (true) : (num_attempts += 1) {
-                    if (self.status.get()) |status| {
-                        if (status != .closed) unreachable;
+                var last_err: ConnectionError = undefined;
 
-                        self.client.release(self);
-                        suspend {
-                            self.cleanup();
-                            self.client.wga.allocator.destroy(self);
-                        }
+                while (true) : (num_attempts += 1) {
+                    if (!self.mayReconnect()) {
+                        return;
                     }
 
                     if (num_attempts == 10) {
-                        if (self.status.set()) {
-                            self.status.commit(.{ .failed = last_err });
-                        }
-
-                        self.client.release(self);
-                        suspend {
-                            self.cleanup();
-                            self.client.wga.allocator.destroy(self);
-                        }
+                        self.reportError(last_err);
+                        return;
                     }
 
                     log.info("attempt {d}: reconnecting to {}...", .{
@@ -173,21 +273,14 @@ pub const Client = struct {
                     break;
                 }
 
-                if (self.status.set()) {
-                    self.status.commit(.closed);
-                } else {
+                if (!self.reportConnected()) {
                     self.socket.deinit();
-
-                    self.client.release(self);
-                    suspend {
-                        self.cleanup();
-                        self.client.wga.allocator.destroy(self);
-                    }
+                    return;
                 }
             }
         }
 
-        fn connect(self: *Connection, reactor: Reactor) ConnectError!void {
+        fn connect(self: *Connection, reactor: Reactor) !void {
             self.socket = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
             errdefer self.socket.deinit();
 
@@ -226,7 +319,6 @@ pub const Client = struct {
                     while (index < first.value.len) {
                         const num_bytes = await async self.socket.send(first.value[index..], os.MSG_NOSIGNAL) catch |err| switch (err) {
                             error.ConnectionResetByPeer => return,
-                            error.BrokenPipe => return,
                             else => return err,
                         };
 
@@ -260,6 +352,25 @@ pub const Client = struct {
             const node = try mpsc_node_pool.acquire(hyperia.allocator);
             node.* = .{ .value = buf };
             self.queue.push(node);
+        }
+
+        fn wait(self: *Connection) ConnectionError!void {
+            var waiter: Waiter = .{ .frame = @frame() };
+
+            suspend {
+                const held = self.client.lock.acquire();
+                defer held.release();
+
+                if (self.status == .connected) {
+                    waiter.result = {};
+                    hyperia.pool.schedule(.{}, &waiter.runnable);
+                } else {
+                    waiter.next = self.waiters;
+                    self.waiters = &waiter;
+                }
+            }
+
+            return waiter.result;
         }
     };
 
@@ -297,14 +408,9 @@ pub const Client = struct {
         for (self.pool[0..self.pos]) |conn, i| {
             log.info("closing [{d}] {}", .{ i, self.address });
 
-            const status = conn.status.get();
-            const connected = status != null and status.? == .connected;
-
-            conn.status.reset();
-            if (conn.status.set()) conn.status.commit(.closed);
-            if (!connected) continue;
-
-            conn.socket.shutdown(.both) catch {};
+            if (conn.status == .connected) {
+                conn.socket.shutdown(.both) catch {};
+            }
         }
     }
 
@@ -314,12 +420,15 @@ pub const Client = struct {
 
         conn.client = self;
         conn.queue = .{};
-        conn.status = .{};
+        conn.waiters = null;
+        conn.status = .not_connected;
 
         self.pool[self.pos] = conn;
         self.pos += 1;
 
         conn.frame = async conn.start(reactor);
+
+        log.info("there are {} connections", .{self.pos});
 
         return conn;
     }
@@ -361,35 +470,31 @@ pub const Client = struct {
                 break :connect Result{ .@"0" = pool.len, .@"1" = min_conn };
             };
 
-            switch (result[1].status.wait()) {
-                .failed => |err| {
-                    if (result[0] > 0) {
-                        continue;
-                    }
+            result[1].wait() catch |err| switch (err) {
+                error.Retry => {
+                    log.info("got a retry", .{});
+                    continue;
+                },
+                else => {
+                    log.warn("got error: {}", .{err});
                     return err;
                 },
-                .closed => continue,
-                else => {},
-            }
+            };
 
             return result[1];
         }
     }
 
     fn release(self: *Self, conn: *Connection) void {
-        const held = self.lock.acquire();
-        defer held.release();
-
-        if (mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn)) |i| {
-            if (i == self.pos - 1) {
-                self.pool[i] = undefined;
-                self.pos -= 1;
-                return;
-            }
-
-            self.pool[i] = self.pool[self.pos - 1];
+        const i = mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn) orelse unreachable;
+        if (i == self.pos - 1) {
+            self.pool[i] = undefined;
             self.pos -= 1;
+            return;
         }
+
+        self.pool[i] = self.pool[self.pos - 1];
+        self.pos -= 1;
     }
 
     pub fn write(self: *Self, reactor: Reactor, buf: []const u8) !void {
