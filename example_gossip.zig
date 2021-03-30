@@ -45,25 +45,27 @@ pub const Client = struct {
         status: oneshot.Channel(ConnectionStatus),
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
-            defer {
-                if (self.client.release(self)) {
+            if (self.status.set()) {
+                self.connect(reactor) catch |err| {
+                    self.status.commit(.{ .failed = err });
+
+                    self.client.release(self);
                     suspend {
                         self.cleanup();
                         self.client.wga.allocator.destroy(self);
                     }
-                }
-            }
-
-            if (self.status.set()) {
-                self.connect(reactor) catch |err| {
-                    self.status.commit(.{ .failed = err });
-                    return err;
                 };
 
                 self.status.commit(.connected);
             } else {
-                return error.Cancelled;
+                self.client.release(self);
+                suspend {
+                    self.cleanup();
+                    self.client.wga.allocator.destroy(self);
+                }
             }
+
+            _ = @atomicRmw(usize, &self.client.live, .Add, 1, .AcqRel);
 
             while (true) {
                 const Cases = struct {
@@ -101,26 +103,19 @@ pub const Client = struct {
                     },
                 }
 
-                const is_last_connection = check: {
-                    const held = self.client.lock.acquire();
-                    defer held.release();
-
-                    // (block acquire()'s that may have got a hold of this instance)
-
-                    if (self.status.get()) |status| {
-                        if (status != .closed) {
-                            self.status.reset();
-                        }
+                if (self.status.get()) |status| {
+                    if (status != .closed) {
+                        self.status.reset();
+                        self.socket.deinit();
                     }
-
-                    // ... messages that leaked before self.status.reset() may still be queued
-                    // (cleanup leaked messages)
-
-                    self.cleanup();
+                } else {
                     self.socket.deinit();
+                }
 
-                    break :check self.client.pos == 1;
-                };
+                self.cleanup();
+
+                const is_last_connection = @atomicRmw(usize, &self.client.live, .Sub, 1, .AcqRel) == 1;
+                log.info("is last connection? {}", .{is_last_connection});
 
                 // if we are the last client in the pool, retry
                 // - if successful,   self.status.set(error.RetryAcquiringConnection) (let acquire() waiters retry and acquire this connection)
@@ -132,7 +127,12 @@ pub const Client = struct {
                     if (self.status.set()) {
                         self.status.commit(.closed);
                     }
-                    return;
+
+                    self.client.release(self);
+                    suspend {
+                        self.cleanup();
+                        self.client.wga.allocator.destroy(self);
+                    }
                 }
 
                 var num_attempts: usize = 0;
@@ -140,14 +140,24 @@ pub const Client = struct {
                 while (true) : (num_attempts += 1) {
                     if (self.status.get()) |status| {
                         if (status != .closed) unreachable;
-                        return error.Cancelled;
+
+                        self.client.release(self);
+                        suspend {
+                            self.cleanup();
+                            self.client.wga.allocator.destroy(self);
+                        }
                     }
 
                     if (num_attempts == 10) {
                         if (self.status.set()) {
                             self.status.commit(.{ .failed = last_err });
                         }
-                        return last_err;
+
+                        self.client.release(self);
+                        suspend {
+                            self.cleanup();
+                            self.client.wga.allocator.destroy(self);
+                        }
                     }
 
                     log.info("attempt {d}: reconnecting to {}...", .{
@@ -167,7 +177,12 @@ pub const Client = struct {
                     self.status.commit(.closed);
                 } else {
                     self.socket.deinit();
-                    return error.Cancelled;
+
+                    self.client.release(self);
+                    suspend {
+                        self.cleanup();
+                        self.client.wga.allocator.destroy(self);
+                    }
                 }
             }
         }
@@ -255,6 +270,7 @@ pub const Client = struct {
 
     pool: [*]*Connection,
     pos: usize = 0,
+    live: usize = 0,
 
     address: net.Address,
     wga: AsyncWaitGroupAllocator,
@@ -308,26 +324,7 @@ pub const Client = struct {
         return conn;
     }
 
-    fn release(self: *Self, conn: *Connection) bool {
-        const held = self.lock.acquire();
-        defer held.release();
-
-        if (mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn)) |i| {
-            if (i == self.pos - 1) {
-                self.pool[i] = undefined;
-                self.pos -= 1;
-                return true;
-            }
-
-            self.pool[i] = self.pool[self.pos - 1];
-            self.pos -= 1;
-            return true;
-        }
-
-        return false;
-    }
-
-    pub fn acquire(self: *Self, reactor: Reactor) !*Connection {
+    fn acquire(self: *Self, reactor: Reactor) !*Connection {
         while (true) {
             const Result = std.meta.Tuple(&[_]type{ usize, *Connection });
 
@@ -365,12 +362,33 @@ pub const Client = struct {
             };
 
             switch (result[1].status.wait()) {
-                .failed => |err| return err,
+                .failed => |err| {
+                    if (result[0] > 0) {
+                        continue;
+                    }
+                    return err;
+                },
                 .closed => continue,
                 else => {},
             }
 
             return result[1];
+        }
+    }
+
+    fn release(self: *Self, conn: *Connection) void {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        if (mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn)) |i| {
+            if (i == self.pos - 1) {
+                self.pool[i] = undefined;
+                self.pos -= 1;
+                return;
+            }
+
+            self.pool[i] = self.pool[self.pos - 1];
+            self.pos -= 1;
         }
     }
 
@@ -573,8 +591,7 @@ pub const Node = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        const entry = self.connections.swapRemove(address.any) orelse return false;
-        return true;
+        return self.clients.swapRemove(address.any) != null;
     }
 
     fn acquire(self: *Node, allocator: *mem.Allocator, address: net.Address) !*Client {
