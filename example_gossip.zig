@@ -196,7 +196,7 @@ pub const Client = struct {
                 if (num_items == 0) return;
 
                 var i: usize = 0;
-                errdefer while (i < num_items) : (i += 1) {
+                defer while (i < num_items) : (i += 1) {
                     const next = first.next;
                     mpsc_node_pool.release(hyperia.allocator, first);
                     first = next orelse continue;
@@ -547,7 +547,7 @@ pub const Node = struct {
                 if (num_items == 0) return;
 
                 var i: usize = 0;
-                errdefer while (i < num_items) : (i += 1) {
+                defer while (i < num_items) : (i += 1) {
                     const next = first.next;
                     mpsc_sink_pool.release(hyperia.allocator, first);
                     first = next orelse continue;

@@ -91,7 +91,7 @@ pub const Server = struct {
                 if (num_items == 0) return;
 
                 var i: usize = 0;
-                errdefer while (i < num_items) : (i += 1) {
+                defer while (i < num_items) : (i += 1) {
                     const next = first.next;
                     pool.release(hyperia.allocator, first);
                     first = next orelse continue;
