@@ -39,7 +39,7 @@ pub const Frame = struct {
 pub const Client = struct {
     const Self = @This();
 
-    pub const ConnectionError = AsyncSocket.ConnectError || os.EpollCtlError || os.SocketError;
+    pub const ConnectionError = AsyncSocket.ConnectError || AsyncSocket.SendError || AsyncSocket.RecvFromError || os.EpollCtlError || os.SocketError || mem.Allocator.Error;
 
     pub const ClientStatus = enum {
         open,
@@ -92,7 +92,11 @@ pub const Client = struct {
             }
 
             while (true) {
-                self.run();
+                const maybe_err: ?ConnectionError = if (self.run()) |_| null else |err| err;
+
+                if (self.client.reportDisconnected(self, maybe_err)) {
+                    return;
+                }
 
                 var num_attempts: usize = 0;
                 var last_err: ConnectionError = undefined;
@@ -151,11 +155,16 @@ pub const Client = struct {
             }
         }
 
-        fn run(self: *Connection) void {
+        fn cancelWrites(self: *Connection) void {
+            self.queue.cancel();
+            self.socket.cancel(.write);
+        }
+
+        fn run(self: *Connection) ConnectionError!void {
             const Cases = struct {
                 write: struct {
                     run: Case(Connection.writeLoop),
-                    cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
+                    cancel: Case(Connection.cancelWrites),
                 },
                 read: struct {
                     run: Case(Connection.readLoop),
@@ -167,7 +176,7 @@ pub const Client = struct {
                 Cases{
                     .write = .{
                         .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
+                        .cancel = call(Connection.cancelWrites, .{self}),
                     },
                     .read = .{
                         .run = call(Connection.readLoop, .{self}),
@@ -178,17 +187,21 @@ pub const Client = struct {
                 .write => |result| {
                     if (result) {} else |err| {
                         log.warn("write error: {}", .{err});
+                        return err;
                     }
                 },
                 .read => |result| {
                     if (result) {} else |err| {
                         log.warn("read error: {}", .{err});
+                        return err;
                     }
                 },
             }
         }
 
         fn writeLoop(self: *Connection) !void {
+            defer log.info("{*} write loop has closed", .{self});
+
             var first: *mpsc.Queue([]const u8).Node = undefined;
             var last: *mpsc.Queue([]const u8).Node = undefined;
             while (true) {
@@ -205,11 +218,7 @@ pub const Client = struct {
                 while (i < num_items) : (i += 1) {
                     var index: usize = 0;
                     while (index < first.value.len) {
-                        const num_bytes = (await (async self.socket.send(first.value[index..], os.MSG_NOSIGNAL))) catch |err| switch (err) {
-                            error.ConnectionResetByPeer => return,
-                            else => return err,
-                        };
-
+                        const num_bytes = try (await (async self.socket.send(first.value[index..], os.MSG_NOSIGNAL)));
                         index += num_bytes;
                     }
 
@@ -221,12 +230,11 @@ pub const Client = struct {
         }
 
         fn readLoop(self: *Connection) !void {
+            defer log.info("{*} read loop has closed", .{self});
+
             var buf: [4096]u8 = undefined;
             while (true) {
-                const num_bytes = self.socket.recv(&buf, os.MSG_NOSIGNAL) catch |err| switch (err) {
-                    error.ConnectionResetByPeer => return,
-                    else => return err,
-                };
+                const num_bytes = try self.socket.recv(&buf, os.MSG_NOSIGNAL);
                 if (num_bytes == 0) return;
 
                 const message = mem.trim(u8, buf[0..num_bytes], "\r\n");
@@ -291,7 +299,7 @@ pub const Client = struct {
 
         conn.frame = async conn.start(reactor);
 
-        log.info("there are {} connections", .{self.pos});
+        log.info("connection {*} was established", .{conn});
 
         return conn;
     }
@@ -386,20 +394,26 @@ pub const Client = struct {
             unreachable; // should never be called if 'connected' is true
         }
 
+        const had_errored = self.status == .errored;
+
+        log.info("(before) # conns: {}, status: {}", .{ self.pos, self.status });
+
         self.status = .errored;
         self.release(conn);
 
         // (maybe) ONLY wake up waiters and report the error if it is the only connection
         // in the pool
 
-        if (self.pos > 0) return;
+        log.info("(after) # conns: {}, status: {}", .{ self.pos, self.status });
 
-        var batch: zap.Pool.Batch = .{};
-        defer hyperia.pool.schedule(.{}, batch);
+        if (self.pos == 0) {
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
 
-        while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-            waiter.result = err;
-            batch.push(&waiter.runnable);
+            while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                waiter.result = err;
+                batch.push(&waiter.runnable);
+            }
         }
     }
 
@@ -437,6 +451,31 @@ pub const Client = struct {
         return true;
     }
 
+    fn reportDisconnected(self: *Self, conn: *Connection, maybe_err: ?ConnectionError) bool {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        log.info("report disconnect on #{} (status is {})", .{ self.pos, self.status });
+
+        if (!conn.connected) {
+            unreachable;
+        }
+
+        conn.connected = false;
+        conn.socket.deinit();
+
+        if (self.status != .closed and maybe_err != null) {
+            self.status = .errored;
+        }
+
+        if (self.status == .closed or self.pos > 1) {
+            self.release(conn);
+            return true;
+        }
+
+        return false;
+    }
+
     fn mayReconnect(self: *Self, conn: *Connection) bool {
         const held = self.lock.acquire();
         defer held.release();
@@ -447,21 +486,24 @@ pub const Client = struct {
         // - should we only attempt to reconnect if 'self.client.errored' is true? (check) (maybe not)
 
         if (conn.connected) {
-            conn.connected = false;
-            conn.socket.deinit();
+            unreachable;
         }
+
+        log.info("status is {}, # clients is {}", .{ self.status, self.pos });
 
         if (self.status == .closed or self.pos > 1) {
             self.release(conn);
             return false;
         }
 
-        conn.connected = false;
         return true;
     }
 
     fn release(self: *Self, conn: *Connection) void {
         const i = mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn) orelse unreachable;
+
+        log.info("connection {*} was released", .{conn});
+
         if (i == self.pos - 1) {
             self.pool[i] = undefined;
             self.pos -= 1;
@@ -707,9 +749,11 @@ pub const Node = struct {
 pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
     for (options.peer_addresses) |peer_address| {
         var i: usize = 0;
-        while (true) {
+        while (i < 10_000_000) : (i += 1) {
             try node.write(hyperia.allocator, reactor, peer_address, "initial message\n");
         }
+
+        log.info("Done!", .{});
     }
     suspend;
 }

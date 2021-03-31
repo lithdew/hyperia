@@ -69,8 +69,8 @@ pub fn select(cases: anytype) ResultUnionOf(@TypeOf(cases)) {
     const result_idx = @enumToInt(result);
 
     inline for (@typeInfo(@TypeOf(cases)).Struct.fields) |field, i| {
-        if (i != result_idx) {
-            if (comptime @hasField(@TypeOf(@field(cases, field.name)), "cancel")) {
+        if (comptime @hasField(@TypeOf(@field(cases, field.name)), "cancel")) {
+            if (i != result_idx) {
                 const cancel = @field(@field(cases, field.name), "cancel");
                 @call(comptime .{}, @TypeOf(cancel).function, cancel.args);
                 await frames[i];
