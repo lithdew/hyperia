@@ -50,6 +50,22 @@ pub const AsyncSocket = struct {
         return self.socket.setReuseAddress(enabled);
     }
 
+    pub fn setReusePort(self: *Self, enabled: bool) !void {
+        return self.socket.setReusePort(enabled);
+    }
+
+    pub fn setNoDelay(self: *Self, enabled: bool) !void {
+        return self.socket.setNoDelay(enabled);
+    }
+
+    pub fn setFastOpen(self: *Self, enabled: bool) !void {
+        return self.socket.setFastOpen(enabled);
+    }
+
+    pub fn setQuickAck(self: *Self, enabled: bool) !void {
+        return self.socket.setQuickAck(enabled);
+    }
+
     pub fn getName(self: *Self) !net.Address {
         return self.socket.getName();
     }

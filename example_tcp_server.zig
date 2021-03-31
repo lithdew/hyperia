@@ -85,6 +85,11 @@ pub const Server = struct {
         try reactor.add(self.listener.socket.fd, &self.listener.handle, .{ .readable = true });
 
         try self.listener.setReuseAddress(true);
+        try self.listener.setReusePort(true);
+        try self.listener.setNoDelay(true);
+        try self.listener.setFastOpen(true);
+        try self.listener.setQuickAck(true);
+
         try self.listener.bind(address);
         try self.listener.listen(128);
 
@@ -95,6 +100,8 @@ pub const Server = struct {
         while (true) {
             var conn = try self.listener.accept(os.SOCK_CLOEXEC | os.SOCK_NONBLOCK);
             errdefer conn.socket.deinit();
+
+            try conn.socket.setNoDelay(true);
 
             log.info("got connection: {}", .{conn.address});
 

@@ -32,7 +32,33 @@ pub const Socket = struct {
     }
 
     pub fn setReuseAddress(self: Socket, enabled: bool) !void {
-        try os.setsockopt(self.fd, os.SOL_SOCKET, os.SO_REUSEADDR, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        if (@hasDecl(os, "SO_REUSEADDR")) {
+            try os.setsockopt(self.fd, os.SOL_SOCKET, os.SO_REUSEADDR, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        }
+    }
+
+    pub fn setReusePort(self: Socket, enabled: bool) !void {
+        if (@hasDecl(os, "SO_REUSEPORT")) {
+            try os.setsockopt(self.fd, os.SOL_SOCKET, os.SO_REUSEPORT, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        }
+    }
+
+    pub fn setNoDelay(self: Socket, enabled: bool) !void {
+        if (@hasDecl(os, "TCP_NODELAY")) {
+            try os.setsockopt(self.fd, os.IPPROTO_TCP, os.TCP_NODELAY, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        }
+    }
+
+    pub fn setFastOpen(self: Socket, enabled: bool) !void {
+        if (@hasDecl(os, "TCP_FASTOPEN")) {
+            try os.setsockopt(self.fd, os.IPPROTO_TCP, os.TCP_FASTOPEN, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        }
+    }
+
+    pub fn setQuickAck(self: Socket, enabled: bool) !void {
+        if (@hasDecl(os, "TCP_QUICKACK")) {
+            try os.setsockopt(self.fd, os.IPPROTO_TCP, os.TCP_QUICKACK, mem.asBytes(&@as(usize, @boolToInt(enabled))));
+        }
     }
 
     pub fn getName(self: Socket) !net.Address {
