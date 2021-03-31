@@ -155,16 +155,11 @@ pub const Client = struct {
             }
         }
 
-        fn cancelWrites(self: *Connection) void {
-            self.queue.cancel();
-            self.socket.cancel(.write);
-        }
-
         fn run(self: *Connection) ConnectionError!void {
             const Cases = struct {
                 write: struct {
                     run: Case(Connection.writeLoop),
-                    cancel: Case(Connection.cancelWrites),
+                    cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
                 },
                 read: struct {
                     run: Case(Connection.readLoop),
@@ -176,7 +171,7 @@ pub const Client = struct {
                 Cases{
                     .write = .{
                         .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(Connection.cancelWrites, .{self}),
+                        .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
                     },
                     .read = .{
                         .run = call(Connection.readLoop, .{self}),
@@ -200,12 +195,10 @@ pub const Client = struct {
         }
 
         fn writeLoop(self: *Connection) !void {
-            defer log.info("{*} write loop has closed", .{self});
-
             var first: *mpsc.Queue([]const u8).Node = undefined;
             var last: *mpsc.Queue([]const u8).Node = undefined;
             while (true) {
-                const num_items = self.queue.popBatch(&first, &last);
+                const num_items = await async self.queue.popBatch(&first, &last);
                 if (num_items == 0) return;
 
                 var i: usize = 0;
@@ -218,7 +211,7 @@ pub const Client = struct {
                 while (i < num_items) : (i += 1) {
                     var index: usize = 0;
                     while (index < first.value.len) {
-                        const num_bytes = try (await (async self.socket.send(first.value[index..], os.MSG_NOSIGNAL)));
+                        const num_bytes = try await async self.socket.send(first.value[index..], os.MSG_NOSIGNAL);
                         index += num_bytes;
                     }
 
@@ -230,8 +223,6 @@ pub const Client = struct {
         }
 
         fn readLoop(self: *Connection) !void {
-            defer log.info("{*} read loop has closed", .{self});
-
             var buf: [4096]u8 = undefined;
             while (true) {
                 const num_bytes = try self.socket.recv(&buf, os.MSG_NOSIGNAL);
@@ -394,8 +385,6 @@ pub const Client = struct {
             unreachable; // should never be called if 'connected' is true
         }
 
-        const had_errored = self.status == .errored;
-
         log.info("(before) # conns: {}, status: {}", .{ self.pos, self.status });
 
         self.status = .errored;
@@ -454,8 +443,6 @@ pub const Client = struct {
     fn reportDisconnected(self: *Self, conn: *Connection, maybe_err: ?ConnectionError) bool {
         const held = self.lock.acquire();
         defer held.release();
-
-        log.info("report disconnect on #{} (status is {})", .{ self.pos, self.status });
 
         if (!conn.connected) {
             unreachable;
