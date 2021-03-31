@@ -69,7 +69,6 @@ pub const Client = struct {
 
         pub fn start(self: *Connection, reactor: Reactor) !void {
             defer {
-                log.info("???", .{});
                 suspend {
                     self.cleanup();
                     self.client.wga.allocator.destroy(self);
@@ -316,13 +315,10 @@ pub const Client = struct {
 
             var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
             suspend {
-                log.info("suspended 1", .{});
                 waiter.next = self.waiters;
                 self.waiters = &waiter;
                 held.release();
             }
-
-            log.info("resumed 1", .{});
 
             return waiter.result;
         }
@@ -330,7 +326,6 @@ pub const Client = struct {
         var min_conn = pool[0];
         var min_pending = min_conn.queue.peek();
         if (min_pending == 0 and min_conn.connected) {
-            log.info("returning min conn {*}", .{min_conn});
             held.release();
             return min_conn;
         }
@@ -340,7 +335,6 @@ pub const Client = struct {
 
             const pending = conn.queue.peek();
             if (pending == 0) {
-                log.info("returning pooled conn {*}", .{conn});
                 held.release();
                 return conn;
             }
@@ -358,37 +352,25 @@ pub const Client = struct {
 
             var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
             suspend {
-                log.info("suspended 2", .{});
                 waiter.next = self.waiters;
                 self.waiters = &waiter;
                 held.release();
-            }
-
-            if (waiter.result) |r| {
-                log.info("resumed 2 (result is {*})", .{r});
-                log.info("resumed 2 (connected is {})", .{r.connected});
-            } else |err| {
-                log.info("resumed 2 (result is {})", .{err});
             }
 
             return waiter.result;
         }
 
         if (min_conn.connected) {
-            log.info("returning connected min conn {*}", .{min_conn});
             held.release();
             return min_conn;
         }
 
         var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
         suspend {
-            log.info("suspended 3", .{});
             waiter.next = self.waiters;
             self.waiters = &waiter;
             held.release();
         }
-
-        log.info("resumed 3", .{});
 
         return waiter.result;
     }
@@ -405,7 +387,6 @@ pub const Client = struct {
         }
 
         self.status = .errored;
-        log.info("release connect error", .{});
         self.release(conn);
 
         // (maybe) ONLY wake up waiters and report the error if it is the only connection
@@ -417,7 +398,6 @@ pub const Client = struct {
         defer hyperia.pool.schedule(.{}, batch);
 
         while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-            log.info("2 next is {*}", .{waiter.next});
             waiter.result = err;
             batch.push(&waiter.runnable);
         }
@@ -435,7 +415,6 @@ pub const Client = struct {
             }
 
             conn.socket.deinit();
-            log.info("release connected", .{});
             self.release(conn);
 
             return false;
@@ -451,12 +430,9 @@ pub const Client = struct {
         defer hyperia.pool.schedule(.{}, batch);
 
         while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-            log.info("1 next is {*}", .{waiter.next});
             waiter.result = conn;
             batch.push(&waiter.runnable);
         }
-
-        log.info("report connected", .{});
 
         return true;
     }
@@ -476,7 +452,6 @@ pub const Client = struct {
         }
 
         if (self.status == .closed or self.pos > 1) {
-            log.info("release may reconnect", .{});
             self.release(conn);
             return false;
         }
@@ -486,8 +461,6 @@ pub const Client = struct {
     }
 
     fn release(self: *Self, conn: *Connection) void {
-        log.info("deallocating", .{});
-
         const i = mem.indexOfScalar(*Connection, self.pool[0..self.pos], conn) orelse unreachable;
         if (i == self.pos - 1) {
             self.pool[i] = undefined;
@@ -500,9 +473,7 @@ pub const Client = struct {
     }
 
     pub fn write(self: *Self, reactor: Reactor, buf: []const u8) !void {
-        const conn = try self.acquire(reactor);
-        mem.doNotOptimizeAway(conn);
-        log.info("conn is {}", .{@ptrToInt(conn)});
+        const conn = try await async self.acquire(reactor);
         try conn.write(buf);
     }
 };
