@@ -737,7 +737,6 @@ pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
 
         log.info("Done!", .{});
     }
-    suspend;
 }
 
 pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
