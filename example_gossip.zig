@@ -75,15 +75,17 @@ pub const Client = struct {
                 }
             }
 
-            var frame: Frame = .{ .frame = @frame() };
-            suspend hyperia.pool.schedule(.{}, &frame.runnable);
-
             // self.client.closed MUST be false when a connection is started
             // an attempt to connect is made below, which MUST suspend this function and return control to acquire()
+
+            var frame: Frame = .{ .frame = @frame() };
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
 
             self.tryConnect(reactor) catch |err| {
                 return self.client.reportConnectError(self, err);
             };
+
+            suspend hyperia.pool.schedule(.{}, &frame.runnable);
 
             // we successfully connected
 
@@ -110,8 +112,9 @@ pub const Client = struct {
                         return self.client.reportConnectError(self, last_err);
                     }
 
-                    log.info("attempt {d}: reconnecting to {}...", .{
+                    log.info("attempt {d} by {*}: reconnecting to {}...", .{
                         num_attempts,
+                        self,
                         self.client.address,
                     });
 
@@ -136,6 +139,8 @@ pub const Client = struct {
             errdefer self.socket.deinit();
 
             try reactor.add(self.socket.socket.fd, &self.socket.handle, .{ .readable = true, .writable = true });
+
+            log.info("{*} calling connect with fd {}", .{ self, self.socket.socket.fd });
             try self.socket.connect(self.client.address);
         }
 
@@ -290,9 +295,8 @@ pub const Client = struct {
         self.pool[self.pos] = conn;
         self.pos += 1;
 
-        conn.frame = async conn.start(reactor);
-
         log.info("connection {*} was established", .{conn});
+        conn.frame = async conn.start(reactor);
 
         return conn;
     }
@@ -387,15 +391,13 @@ pub const Client = struct {
             unreachable; // should never be called if 'connected' is true
         }
 
-        log.info("(before) # conns: {}, status: {}", .{ self.pos, self.status });
+        log.info("{*} reported an error {} (status: {})", .{ conn, err, self.status });
 
         self.status = .errored;
         self.release(conn);
 
         // (maybe) ONLY wake up waiters and report the error if it is the only connection
         // in the pool
-
-        log.info("(after) # conns: {}, status: {}", .{ self.pos, self.status });
 
         if (self.pos == 0) {
             var batch: zap.Pool.Batch = .{};
@@ -411,6 +413,8 @@ pub const Client = struct {
     fn reportConnected(self: *Self, conn: *Connection) bool {
         const held = self.lock.acquire();
         defer held.release();
+
+        log.info("{*} reported to be connected (status: {})", .{ conn, self.status });
 
         // if 'self.closed', deinit the socket and return false
 
@@ -446,6 +450,8 @@ pub const Client = struct {
         const held = self.lock.acquire();
         defer held.release();
 
+         log.info("{*} reported to be disconnected (status: {})", .{ conn, self.status });
+
         if (!conn.connected) {
             unreachable;
         }
@@ -477,8 +483,6 @@ pub const Client = struct {
         if (conn.connected) {
             unreachable;
         }
-
-        log.info("status is {}, # clients is {}", .{ self.status, self.pos });
 
         if (self.status == .closed or self.pos > 1) {
             self.release(conn);
