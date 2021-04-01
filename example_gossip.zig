@@ -94,6 +94,8 @@ pub const Client = struct {
             while (true) {
                 const maybe_err: ?ConnectionError = if (self.run()) |_| null else |err| err;
 
+                log.info("{*} is done", .{self});
+
                 if (self.client.reportDisconnected(self, maybe_err)) {
                     return;
                 }
@@ -617,33 +619,13 @@ pub const Node = struct {
     }
 
     pub fn deinit(self: *Node, allocator: *mem.Allocator) void {
-        var clients: []*Client = undefined;
-        defer allocator.free(clients);
-
-        {
-            const held = self.lock.acquire();
-            defer held.release();
-
-            for (self.connections.items()) |entry| {
-                log.info("closing incoming connection {}", .{entry.value.address});
-                entry.value.socket.shutdown(.both) catch {};
-            }
-
-            clients = allocator.alloc(*Client, self.clients.count()) catch unreachable;
-
-            for (self.clients.items()) |entry, i| {
-                log.info("closing outgoing connection {}", .{entry.value.address});
-                clients[i] = entry.value;
-                entry.value.close();
-            }
-        }
-
         self.wga.wait();
+
         self.connections.deinit(allocator);
 
-        for (clients) |client| {
-            client.deinit(allocator);
-            allocator.destroy(client);
+        for (self.clients.items()) |entry| {
+            entry.value.deinit(allocator);
+            allocator.destroy(entry.value);
         }
 
         self.clients.deinit(allocator);
@@ -651,6 +633,19 @@ pub const Node = struct {
 
     pub fn close(self: *Node) void {
         self.listener.shutdown(.recv) catch {};
+
+        const held = self.lock.acquire();
+        defer held.release();
+
+        for (self.connections.items()) |entry| {
+            log.info("closing incoming connection {}", .{entry.value.address});
+            entry.value.socket.shutdown(.both) catch {};
+        }
+
+        for (self.clients.items()) |entry, i| {
+            log.info("closing outgoing connection {}", .{entry.value.address});
+            entry.value.close();
+        }
     }
 
     pub fn start(self: *Node, reactor: Reactor, address: net.Address) !void {
@@ -757,13 +752,13 @@ pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoRe
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
     try node.start(reactor, address);
 
+    var example = async runExample(options, reactor, &node);
+    defer await example catch {};
+
     const Cases = struct {
         node: struct {
             run: Case(Node.accept),
             cancel: Case(Node.close),
-        },
-        example: struct {
-            run: Case(runExample),
         },
         ctrl_c: struct {
             run: Case(hyperia.ctrl_c.wait),
@@ -777,9 +772,6 @@ pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoRe
                 .run = call(Node.accept, .{ &node, hyperia.allocator, reactor }),
                 .cancel = call(Node.close, .{&node}),
             },
-            .example = .{
-                .run = call(runExample, .{ options, reactor, &node }),
-            },
             .ctrl_c = .{
                 .run = call(hyperia.ctrl_c.wait, .{}),
                 .cancel = call(hyperia.ctrl_c.cancel, .{}),
@@ -787,9 +779,6 @@ pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoRe
         },
     )) {
         .node => |result| {
-            return result;
-        },
-        .example => |result| {
             return result;
         },
         .ctrl_c => |result| {

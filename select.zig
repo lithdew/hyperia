@@ -69,13 +69,13 @@ pub fn select(cases: anytype) ResultUnionOf(@TypeOf(cases)) {
     const result_idx = @enumToInt(result);
 
     inline for (@typeInfo(@TypeOf(cases)).Struct.fields) |field, i| {
-        if (comptime @hasDecl(@TypeOf(@field(cases, field.name)), "cancel")) {
-            if (i != result_idx) {
+        if (i != result_idx) {
+            if (comptime @hasField(@TypeOf(@field(cases, field.name)), "cancel")) {
                 const cancel = @field(@field(cases, field.name), "cancel");
                 @call(comptime .{}, @TypeOf(cancel).function, cancel.args);
-                await frames[i];
             }
         }
+        await frames[i];
     }
 
     return result;
