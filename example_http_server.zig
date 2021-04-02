@@ -74,11 +74,15 @@ pub const Server = struct {
             var first: *mpsc.Sink([]const u8).Node = undefined;
             var last: *mpsc.Sink([]const u8).Node = undefined;
 
-            var num_items = self.queue.tryPopBatch(&first, &last);
-            while (num_items > 0) : (num_items -= 1) {
-                const next = first.next;
-                pool.release(hyperia.allocator, first);
-                first = next orelse continue;
+            while (true) {
+                var num_items = self.queue.tryPopBatch(&first, &last);
+                if (num_items == 0) break;
+
+                while (num_items > 0) : (num_items -= 1) {
+                    const next = first.next;
+                    pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+                }
             }
         }
 
