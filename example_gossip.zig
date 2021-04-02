@@ -310,14 +310,20 @@ pub const Client = struct {
             return error.Closed;
         }
 
-        if (self.pos == 0) {
-            self.status = .open;
+        const spawned = init: {
+            if (self.pos == 0) {
+                self.status = .open;
 
-            _ = self.connect(reactor) catch |err| {
-                held.release();
-                return err;
-            };
-        }
+                _ = self.connect(reactor) catch |err| {
+                    held.release();
+                    return err;
+                };
+
+                break :init true;
+            }
+
+            break :init false;
+        };
 
         const pool = self.pool[0..self.pos];
 
@@ -342,7 +348,7 @@ pub const Client = struct {
             }
         }
 
-        if (pool.len < capacity and self.status != .errored) {
+        if (pool.len < capacity and !spawned and self.status != .errored) {
             _ = self.connect(reactor) catch |err| {
                 held.release();
                 return err;
