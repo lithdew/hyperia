@@ -75,6 +75,7 @@ pub fn AsyncAutoResetEvent(comptime T: type) type {
                         state = @cmpxchgWeak(usize, &self.state, state, NOTIFIED, .Acquire, .Monotonic) orelse {
                             const node = @intToPtr(*Node, state);
                             node.token = token;
+                            @fence(.Release);
                             return &node.runnable;
                         };
                     } else {
@@ -91,12 +92,13 @@ pub fn AsyncAutoResetEvent(comptime T: type) type {
                 defer @atomicStore(usize, &self.state, EMPTY, .Monotonic);
 
                 if (state != NOTIFIED) {
-                    var node: Node = .{ .frame = @frame() };
+                    var node: Node = .{ .token = mem.zeroes(T), .frame = @frame() };
                     suspend { // This CMPXCHG can only fail if state is NOTIFIED.
                         if (@cmpxchgStrong(usize, &self.state, state, @ptrToInt(&node), .Release, .Monotonic) != null) {
                             hyperia.pool.schedule(.{}, &node.runnable);
                         }
                     }
+                    @fence(.Acquire);
                     return node.token;
                 }
 
