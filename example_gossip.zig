@@ -315,24 +315,16 @@ pub const Client = struct {
             return error.Closed;
         }
 
-        const pool = self.pool[0..self.pos];
-        if (pool.len == 0) {
+        if (self.pos == 0) {
             self.status = .open;
 
             _ = self.connect(reactor) catch |err| {
                 held.release();
                 return err;
             };
-
-            var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
-            suspend {
-                waiter.next = self.waiters;
-                self.waiters = &waiter;
-                held.release();
-            }
-
-            return waiter.result;
         }
+
+        const pool = self.pool[0..self.pos];
 
         var min_conn = pool[0];
         var min_pending = min_conn.queue.peek();
@@ -360,15 +352,6 @@ pub const Client = struct {
                 held.release();
                 return err;
             };
-
-            var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
-            suspend {
-                waiter.next = self.waiters;
-                self.waiters = &waiter;
-                held.release();
-            }
-
-            return waiter.result;
         }
 
         if (min_conn.connected) {
