@@ -477,7 +477,7 @@ pub const Client = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        log.info("{*} reported to be disconnected (status: {}, # conns: {})", .{ conn, self.status, self.pos });
+        log.info("{*} reported to be disconnected ({}) (status: {}, # conns: {})", .{ conn, maybe_err, self.status, self.pos });
 
         if (!conn.connected) unreachable;
         conn.connected = false;
