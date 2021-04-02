@@ -26,8 +26,10 @@ usingnamespace hyperia.select;
 
 pub const log_level = .debug;
 
-var clock: time.Timer = undefined;
 var stopped: bool = false;
+
+var clock: time.Timer = undefined;
+var reactor_event: Reactor.AutoResetEvent = undefined;
 
 var mpsc_node_pool: hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096) = undefined;
 var mpsc_sink_pool: hyperia.ObjectPool(mpsc.Sink([]const u8).Node, 4096) = undefined;
@@ -45,7 +47,7 @@ pub const Frame = struct {
 pub const Client = struct {
     const Self = @This();
 
-    pub const ConnectionError = AsyncSocket.ConnectError || AsyncSocket.SendError || AsyncSocket.RecvFromError || os.EpollCtlError || os.SocketError || mem.Allocator.Error;
+    pub const ConnectionError = AsyncSocket.ConnectError || AsyncSocket.SendError || AsyncSocket.RecvFromError || os.EpollCtlError || os.SocketError || mem.Allocator.Error || error{Timeout};
 
     pub const ClientStatus = enum {
         open,
@@ -72,8 +74,9 @@ pub const Client = struct {
         frame: @Frame(Connection.start),
         queue: mpsc.AsyncQueue([]const u8),
         connected: bool = false,
+        write_timer: Timer,
 
-        pub fn start(self: *Connection, reactor: Reactor) !void {
+        pub fn start(self: *Connection, reactor: Reactor, timer_queue: *TimerQueue) !void {
             defer {
                 suspend {
                     self.cleanup();
@@ -127,7 +130,7 @@ pub const Client = struct {
 
                 suspend hyperia.pool.schedule(.{}, &frame.runnable);
 
-                const maybe_err: ?ConnectionError = if (self.run()) |_| null else |err| err;
+                const maybe_err: ?ConnectionError = if (self.run(timer_queue)) |_| null else |err| err;
 
                 log.info("{*} is done", .{self});
 
@@ -169,27 +172,36 @@ pub const Client = struct {
             }
         }
 
-        fn run(self: *Connection) ConnectionError!void {
+        fn cancelWrites(self: *Connection) void {
+            self.queue.cancel();
+            self.socket.cancel(.write);
+        }
+
+        fn cancelReads(self: *Connection) void {
+            self.socket.cancel(.read);
+        }
+
+        fn run(self: *Connection, timer_queue: *TimerQueue) ConnectionError!void {
             const Cases = struct {
                 write: struct {
                     run: Case(Connection.writeLoop),
-                    cancel: Case(mpsc.AsyncQueue([]const u8).cancel),
+                    cancel: Case(Connection.cancelWrites),
                 },
                 read: struct {
                     run: Case(Connection.readLoop),
-                    cancel: Case(AsyncSocket.cancel),
+                    cancel: Case(Connection.cancelReads),
                 },
             };
 
             switch (select(
                 Cases{
                     .write = .{
-                        .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(mpsc.AsyncQueue([]const u8).cancel, .{&self.queue}),
+                        .run = call(Connection.writeLoop, .{ self, timer_queue }),
+                        .cancel = call(Connection.cancelWrites, .{self}),
                     },
                     .read = .{
                         .run = call(Connection.readLoop, .{self}),
-                        .cancel = call(AsyncSocket.cancel, .{ &self.socket, .read }),
+                        .cancel = call(Connection.cancelReads, .{self}),
                     },
                 },
             )) {
@@ -208,7 +220,11 @@ pub const Client = struct {
             }
         }
 
-        fn writeLoop(self: *Connection) !void {
+        fn doWrite(self: *Connection, buf: []const u8) !usize {
+            return self.socket.send(buf, os.MSG_NOSIGNAL);
+        }
+
+        fn writeLoop(self: *Connection, timer_queue: *TimerQueue) !void {
             var first: *mpsc.Queue([]const u8).Node = undefined;
             var last: *mpsc.Queue([]const u8).Node = undefined;
             while (true) {
@@ -225,7 +241,36 @@ pub const Client = struct {
                 while (i < num_items) : (i += 1) {
                     var index: usize = 0;
                     while (index < first.value.len) {
-                        const num_bytes = try await async self.socket.send(first.value[index..], os.MSG_NOSIGNAL);
+                        try self.write_timer.start(timer_queue, (clock.read() + 500 * time.ns_per_ms) / time.ns_per_ms);
+                        reactor_event.post();
+
+                        const Cases = struct {
+                            write: struct {
+                                run: Case(Connection.doWrite),
+                                cancel: Case(AsyncSocket.cancel),
+                            },
+                            timeout: struct {
+                                run: Case(Timer.wait),
+                                cancel: Case(Timer.cancel),
+                            },
+                        };
+
+                        const num_bytes = switch (select(
+                            Cases{
+                                .write = .{
+                                    .run = call(Connection.doWrite, .{ self, first.value[index..] }),
+                                    .cancel = call(AsyncSocket.cancel, .{ &self.socket, .write }),
+                                },
+                                .timeout = .{
+                                    .run = call(Timer.wait, .{&self.write_timer}),
+                                    .cancel = call(Timer.cancel, .{ &self.write_timer, timer_queue }),
+                                },
+                            },
+                        )) {
+                            .write => |num_bytes| num_bytes catch |err| return err,
+                            .timeout => return error.Timeout,
+                        };
+
                         index += num_bytes;
                     }
 
@@ -291,7 +336,7 @@ pub const Client = struct {
         }
     }
 
-    fn connect(self: *Self, reactor: Reactor) !*Connection {
+    fn connect(self: *Self, reactor: Reactor, timer_queue: *TimerQueue) !*Connection {
         const conn = try self.wga.allocator.create(Connection);
         errdefer self.wga.allocator.destroy(conn);
 
@@ -303,12 +348,12 @@ pub const Client = struct {
         self.pos += 1;
 
         log.info("connection {*} was established", .{conn});
-        conn.frame = async conn.start(reactor);
+        conn.frame = async conn.start(reactor, timer_queue);
 
         return conn;
     }
 
-    fn acquire(self: *Self, reactor: Reactor) !*Connection {
+    fn acquire(self: *Self, reactor: Reactor, timer_queue: *TimerQueue) !*Connection {
         const held = self.lock.acquire();
 
         if (self.status == .closed) {
@@ -320,7 +365,7 @@ pub const Client = struct {
             if (self.pos == 0) {
                 self.status = .open;
 
-                _ = self.connect(reactor) catch |err| {
+                _ = self.connect(reactor, timer_queue) catch |err| {
                     held.release();
                     return err;
                 };
@@ -355,7 +400,7 @@ pub const Client = struct {
         }
 
         if (pool.len < capacity and !spawned and self.status != .errored) {
-            _ = self.connect(reactor) catch |err| {
+            _ = self.connect(reactor, timer_queue) catch |err| {
                 held.release();
                 return err;
             };
@@ -525,8 +570,8 @@ pub const Client = struct {
         self.pos -= 1;
     }
 
-    pub fn write(self: *Self, reactor: Reactor, buf: []const u8) !void {
-        const conn = try await async self.acquire(reactor);
+    pub fn write(self: *Self, reactor: Reactor, timer_queue: *TimerQueue, buf: []const u8) !void {
+        const conn = try await async self.acquire(reactor, timer_queue);
         try conn.write(buf);
     }
 };
@@ -744,24 +789,24 @@ pub const Node = struct {
         return result.entry.value;
     }
 
-    pub fn write(self: *Node, allocator: *mem.Allocator, reactor: Reactor, address: net.Address, buf: []const u8) !void {
+    pub fn write(self: *Node, allocator: *mem.Allocator, reactor: Reactor, timer_queue: *TimerQueue, address: net.Address, buf: []const u8) !void {
         const client = try self.acquire(allocator, address);
-        try client.write(reactor, buf);
+        try client.write(reactor, timer_queue, buf);
     }
 };
 
-pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
+pub fn runExample(options: Options, reactor: Reactor, timer_queue: *TimerQueue, node: *Node) !void {
     for (options.peer_addresses) |peer_address| {
         var i: usize = 0;
         while (i < 10_000_000) : (i += 1) {
-            try node.write(hyperia.allocator, reactor, peer_address, "initial message\n");
+            try node.write(hyperia.allocator, reactor, timer_queue, peer_address, "initial message\n");
         }
 
         log.info("Done!", .{});
     }
 }
 
-pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoResetEvent, timer_queue: *TimerQueue) !void {
+pub fn runApp(options: Options, reactor: Reactor, timer_queue: *TimerQueue) !void {
     defer {
         @atomicStore(bool, &stopped, true, .Release);
         reactor_event.post();
@@ -773,7 +818,7 @@ pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoRe
     const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
     try node.start(reactor, address);
 
-    var example = async runExample(options, reactor, &node);
+    var example = async runExample(options, reactor, timer_queue, &node);
     defer await example catch {};
 
     const Cases = struct {
@@ -910,7 +955,7 @@ pub fn main() !void {
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
 
-    var reactor_event = try Reactor.AutoResetEvent.init(os.EFD_CLOEXEC, reactor);
+    reactor_event = try Reactor.AutoResetEvent.init(os.EFD_CLOEXEC, reactor);
     defer reactor_event.deinit();
 
     try reactor.add(reactor_event.fd, &reactor_event.handle, .{});
@@ -918,37 +963,31 @@ pub fn main() !void {
     var timer_queue = TimerQueue.init(hyperia.allocator);
     defer timer_queue.deinit(hyperia.allocator);
 
-    var frame = async runApp(options, reactor, &reactor_event, &timer_queue);
+    var frame = async runApp(options, reactor, &timer_queue);
 
     while (!@atomicLoad(bool, &stopped, .Acquire)) {
         const EventProcessor = struct {
-            batch: zap.Pool.Batch = .{},
+            batch: *zap.Pool.Batch,
 
-            pub fn call(self: *@This(), event: Reactor.Event) void {
+            pub fn call(self: @This(), event: Reactor.Event) void {
                 const handle = @intToPtr(*Reactor.Handle, event.data);
-                handle.call(&self.batch, event);
+                handle.call(self.batch, event);
             }
         };
 
         const TimerProcessor = struct {
-            batch: zap.Pool.Batch = .{},
+            batch: *zap.Pool.Batch,
 
-            pub fn call(self: *@This(), timer: *Timer) void {
+            pub fn call(self: @This(), timer: *Timer) void {
                 self.batch.push(timer.set());
             }
         };
 
-        var processor: EventProcessor = .{};
-        defer hyperia.pool.schedule(.{}, processor.batch);
+        var batch: zap.Pool.Batch = .{};
+        defer hyperia.pool.schedule(.{}, batch);
 
-        const delay = update: {
-            var timer_processor: TimerProcessor = .{};
-            defer hyperia.pool.schedule(.{}, timer_processor.batch);
-
-            break :update timer_queue.update(clock.read(), &timer_processor);
-        };
-
-        try reactor.poll(128, &processor, delay);
+        try reactor.poll(128, EventProcessor{ .batch = &batch }, timer_queue.delay(clock.read() / time.ns_per_ms));
+        timer_queue.update(clock.read() / time.ns_per_ms, TimerProcessor{ .batch = &batch });
     }
 
     try nosuspend await frame;

@@ -163,7 +163,7 @@ pub fn AsyncQueue(comptime T: type) type {
             return self.queue.tryPopBatch(b_first, b_last);
         }
 
-        pub fn popBatch(self: *Self, b_first: **Queue(T).Node, b_last: **Queue(T).Node) usize {
+        pub fn popBatch(self: *Self, b_first: **Queue(T).Node, b_last: **Queue(T).Node) callconv(.Async) usize {
             while (true) {
                 const num_items = self.tryPopBatch(b_first, b_last);
                 if (num_items == 0) {

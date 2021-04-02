@@ -42,7 +42,7 @@ pub fn select(cases: anytype) ResultUnionOf(@TypeOf(cases)) {
             comptime case_name: []const u8,
         ) type {
             return struct {
-                fn call(channel: *Channel, case: C) void {
+                fn call(channel: *Channel, case: C) callconv(.Async) void {
                     const result = @call(.{}, C.function, case.args);
                     const result_union = @unionInit(ResultUnion, case_name, result);
                     if (channel.set()) channel.commit(result_union);

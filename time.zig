@@ -3,19 +3,33 @@ const zap = @import("zap");
 const hyperia = @import("hyperia.zig");
 
 const mem = std.mem;
+const math = std.math;
 const time = std.time;
 const mpsc = hyperia.mpsc;
 const testing = std.testing;
+
+const assert = std.debug.assert;
 
 pub const Timer = struct {
     pub const DONE = 0;
     pub const CANCELLED = 1;
 
     event: mpsc.AsyncAutoResetEvent(usize) = .{},
-    expires_at: usize,
+    expires_at: usize = 0,
 
-    pub fn cancel(self: *Timer) ?*zap.Pool.Runnable {
-        return self.event.set(CANCELLED);
+    pub fn start(self: *Timer, queue: *Queue, expires_at: usize) !void {
+        self.event = .{};
+        self.expires_at = expires_at;
+
+        try queue.add(self);
+    }
+
+    pub fn cancel(self: *Timer, queue: *Queue) void {
+        if (!queue.cancel(self)) return;
+
+        if (self.event.set(CANCELLED)) |runnable| {
+            hyperia.pool.schedule(.{}, runnable);
+        }
     }
 
     pub fn wait(self: *Timer) bool {
@@ -54,13 +68,31 @@ pub const Queue = struct {
         try self.entries.add(timer);
     }
 
-    pub fn update(self: *Self, current_time: usize, callback: anytype) ?usize {
+    pub fn cancel(self: *Self, timer: *Timer) bool {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        const i = mem.indexOfScalar(*Timer, self.entries.items, timer) orelse return false;
+        assert(self.entries.removeIndex(i) == timer);
+
+        return true;
+    }
+
+    pub fn delay(self: *Self, current_time: usize) ?usize {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        const head = self.entries.peek() orelse return null;
+        return math.sub(usize, head.expires_at, current_time) catch 0;
+    }
+
+    pub fn update(self: *Self, current_time: usize, callback: anytype) void {
         const held = self.lock.acquire();
         defer held.release();
 
         while (true) {
-            const head = self.entries.peek() orelse return null;
-            if (head.expires_at > current_time) return head.expires_at - current_time;
+            const head = self.entries.peek() orelse break;
+            if (head.expires_at > current_time) break;
 
             callback.call(self.entries.remove());
         }
@@ -101,14 +133,12 @@ test "timer/async: add timers and execute them" {
             }
         };
 
-        const delay = update: {
-            var processor: Processor = .{};
-            defer while (processor.batch.pop()) |runnable| runnable.run();
+        time.sleep(queue.delay(@intCast(usize, time.milliTimestamp())) orelse break);
 
-            break :update queue.update(@intCast(usize, time.milliTimestamp()), &processor);
-        };
+        var processor: Processor = .{};
+        defer while (processor.batch.pop()) |runnable| runnable.run();
 
-        time.sleep(delay orelse break);
+        queue.update(@intCast(usize, @intCast(usize, time.milliTimestamp())), &processor);
     }
 
     testing.expect(nosuspend await fa);
@@ -130,9 +160,9 @@ test "timer: add timers and update latest time" {
     try queue.add(&b);
     try queue.add(&c);
 
-    const maybe_delay = queue.update(25, struct {
+    queue.update(25, struct {
         fn call(timer: *Timer) void {}
     });
 
-    testing.expect(maybe_delay == c.expires_at - 25);
+    testing.expect(queue.delay(25) == c.expires_at - 25);
 }
