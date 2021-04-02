@@ -12,7 +12,6 @@ pub const mpsc = @import("mpsc.zig");
 pub const mpmc = @import("mpmc.zig");
 pub const oneshot = @import("oneshot.zig");
 
-pub const timer = @import("timer.zig");
 pub const ctrl_c = @import("ctrl_c.zig");
 pub const select = @import("select.zig");
 
@@ -23,6 +22,9 @@ pub const Socket = @import("socket.zig").Socket;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
 pub const AsyncWaitGroup = @import("async_wait_group.zig").AsyncWaitGroup;
 pub const AsyncWaitGroupAllocator = @import("async_wait_group_allocator.zig").AsyncWaitGroupAllocator;
+
+pub const Timer = @import("time.zig").Timer;
+pub const TimerQueue = @import("time.zig").Queue;
 
 pub var gpa: heap.GeneralPurposeAllocator(.{}) = undefined;
 pub var allocator: *mem.Allocator = undefined;

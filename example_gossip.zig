@@ -3,7 +3,11 @@ const zap = @import("zap");
 const clap = @import("clap");
 const hyperia = @import("hyperia");
 
+const Timer = hyperia.Timer;
+const TimerQueue = hyperia.TimerQueue;
+
 const Reactor = hyperia.Reactor;
+
 const AsyncSocket = hyperia.AsyncSocket;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
@@ -12,6 +16,7 @@ const os = std.os;
 const fmt = std.fmt;
 const net = std.net;
 const mem = std.mem;
+const time = std.time;
 const mpsc = hyperia.mpsc;
 const process = std.process;
 const oneshot = hyperia.oneshot;
@@ -21,6 +26,7 @@ usingnamespace hyperia.select;
 
 pub const log_level = .debug;
 
+var clock: time.Timer = undefined;
 var stopped: bool = false;
 
 var mpsc_node_pool: hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096) = undefined;
@@ -755,7 +761,7 @@ pub fn runExample(options: Options, reactor: Reactor, node: *Node) !void {
     }
 }
 
-pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoResetEvent) !void {
+pub fn runApp(options: Options, reactor: Reactor, reactor_event: *Reactor.AutoResetEvent, timer_queue: *TimerQueue) !void {
     defer {
         @atomicStore(bool, &stopped, true, .Release);
         reactor_event.post();
@@ -893,6 +899,8 @@ pub fn main() !void {
         break :parse peer_addresses.toOwnedSlice();
     };
 
+    clock = try time.Timer.start();
+
     mpsc_node_pool = try hyperia.ObjectPool(mpsc.Queue([]const u8).Node, 4096).init(hyperia.allocator);
     defer mpsc_node_pool.deinit(hyperia.allocator);
 
@@ -907,7 +915,10 @@ pub fn main() !void {
 
     try reactor.add(reactor_event.fd, &reactor_event.handle, .{});
 
-    var frame = async runApp(options, reactor, &reactor_event);
+    var timer_queue = TimerQueue.init(hyperia.allocator);
+    defer timer_queue.deinit(hyperia.allocator);
+
+    var frame = async runApp(options, reactor, &reactor_event, &timer_queue);
 
     while (!@atomicLoad(bool, &stopped, .Acquire)) {
         const EventProcessor = struct {
@@ -919,10 +930,25 @@ pub fn main() !void {
             }
         };
 
+        const TimerProcessor = struct {
+            batch: zap.Pool.Batch = .{},
+
+            pub fn call(self: *@This(), timer: *Timer) void {
+                self.batch.push(timer.set());
+            }
+        };
+
         var processor: EventProcessor = .{};
         defer hyperia.pool.schedule(.{}, processor.batch);
 
-        try reactor.poll(128, &processor, null);
+        const delay = update: {
+            var timer_processor: TimerProcessor = .{};
+            defer hyperia.pool.schedule(.{}, timer_processor.batch);
+
+            break :update timer_queue.update(clock.read(), &timer_processor);
+        };
+
+        try reactor.poll(128, &processor, delay);
     }
 
     try nosuspend await frame;

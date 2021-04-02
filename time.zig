@@ -7,27 +7,27 @@ const time = std.time;
 const mpsc = hyperia.mpsc;
 const testing = std.testing;
 
+pub const Timer = struct {
+    pub const DONE = 0;
+    pub const CANCELLED = 1;
+
+    event: mpsc.AsyncAutoResetEvent(usize) = .{},
+    expires_at: usize,
+
+    pub fn cancel(self: *Timer) ?*zap.Pool.Runnable {
+        return self.event.set(CANCELLED);
+    }
+
+    pub fn wait(self: *Timer) bool {
+        return self.event.wait() == DONE;
+    }
+
+    pub fn set(self: *Timer) ?*zap.Pool.Runnable {
+        return self.event.set(DONE);
+    }
+};
+
 pub const Queue = struct {
-    const Timer = struct {
-        pub const DONE = 0;
-        pub const CANCELLED = 1;
-
-        event: mpsc.AsyncAutoResetEvent(usize) = .{},
-        expires_at: usize,
-
-        pub fn cancel(self: *Timer) ?*zap.Pool.Runnable {
-            return self.event.set(CANCELLED);
-        }
-
-        pub fn wait(self: *Timer) bool {
-            return self.event.wait() == DONE;
-        }
-
-        pub fn set(self: *Timer) ?*zap.Pool.Runnable {
-            return self.event.set(DONE);
-        }
-    };
-
     const Self = @This();
 
     lock: std.Thread.Mutex = .{},
@@ -80,9 +80,9 @@ test "timer/async: add timers and execute them" {
     var queue = Queue.init(allocator);
     defer queue.deinit(allocator);
 
-    var a: Queue.Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 10 };
-    var b: Queue.Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 20 };
-    var c: Queue.Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 30 };
+    var a: Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 10 };
+    var b: Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 20 };
+    var c: Timer = .{ .expires_at = @intCast(usize, time.milliTimestamp()) + 30 };
 
     try queue.add(&a);
     try queue.add(&b);
@@ -96,7 +96,7 @@ test "timer/async: add timers and execute them" {
         const Processor = struct {
             batch: zap.Pool.Batch = .{},
 
-            fn call(self: *@This(), timer: *Queue.Timer) void {
+            fn call(self: *@This(), timer: *Timer) void {
                 self.batch.push(timer.set());
             }
         };
@@ -122,16 +122,16 @@ test "timer: add timers and update latest time" {
     var queue = Queue.init(allocator);
     defer queue.deinit(allocator);
 
-    var a: Queue.Timer = .{ .expires_at = 10 };
-    var b: Queue.Timer = .{ .expires_at = 20 };
-    var c: Queue.Timer = .{ .expires_at = 30 };
+    var a: Timer = .{ .expires_at = 10 };
+    var b: Timer = .{ .expires_at = 20 };
+    var c: Timer = .{ .expires_at = 30 };
 
     try queue.add(&a);
     try queue.add(&b);
     try queue.add(&c);
 
     const maybe_delay = queue.update(25, struct {
-        fn call(timer: *Queue.Timer) void {}
+        fn call(timer: *Timer) void {}
     });
 
     testing.expect(maybe_delay == c.expires_at - 25);
