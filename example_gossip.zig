@@ -142,12 +142,7 @@ pub const Client = struct {
 
             log.info("{*} calling connect with fd {}", .{ self, self.socket.socket.fd });
 
-            while (true) {
-                return self.socket.connect(self.client.address) catch |err| switch (err) {
-                    error.ConnectionPending => continue,
-                    else => err,
-                };
-            }
+            try self.socket.connect(self.client.address);
         }
 
         fn write(self: *Connection, buf: []const u8) !void {
@@ -479,6 +474,7 @@ pub const Client = struct {
         log.info("{*} reported to be disconnected (status: {}, # conns: {})", .{ conn, self.status, self.pos });
 
         if (!conn.connected) unreachable;
+        conn.connected = false;
 
         if (self.status == .closed) {
             conn.socket.deinit();
@@ -498,7 +494,6 @@ pub const Client = struct {
             return true;
         }
 
-        conn.connected = false;
         conn.socket.deinit();
         return false;
     }
