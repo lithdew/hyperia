@@ -38,7 +38,7 @@ pub fn init() void {
     }
     allocator = &gpa.allocator;
 
-    pool = zap.Pool.init(.{});
+    pool = zap.Pool.init(.{ .max_threads = 1 });
 }
 
 pub fn deinit() void {

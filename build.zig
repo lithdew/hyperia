@@ -54,6 +54,7 @@ pub fn build(b: *Builder) void {
     test_step.dependOn(&file.step);
 
     inline for (.{
+        "example_tcp_client",
         "example_tcp_server",
         "example_http_server",
         "example_gossip",
