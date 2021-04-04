@@ -50,8 +50,8 @@ pub const Queue = struct {
     pub fn init(allocator: *mem.Allocator) Self {
         return Self{
             .entries = std.PriorityQueue(*Timer).init(allocator, struct {
-                fn lessThan(a: *Timer, b: *Timer) bool {
-                    return a.expires_at < b.expires_at;
+                fn lessThan(a: *Timer, b: *Timer) math.Order {
+                    return math.order(a.expires_at, b.expires_at);
                 }
             }.lessThan),
         };

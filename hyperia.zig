@@ -8,6 +8,7 @@ const testing = std.testing;
 
 const assert = std.debug.assert;
 
+pub const sync = @import("sync.zig");
 pub const mpsc = @import("mpsc.zig");
 pub const mpmc = @import("mpmc.zig");
 pub const oneshot = @import("oneshot.zig");
@@ -38,7 +39,7 @@ pub fn init() void {
     }
     allocator = &gpa.allocator;
 
-    pool = zap.Pool.init(.{ .max_threads = 1 });
+    pool = zap.Pool.init(.{ .max_threads = 4 });
 }
 
 pub fn deinit() void {
