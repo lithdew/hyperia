@@ -3,6 +3,7 @@ const zap = @import("zap");
 const hyperia = @import("hyperia");
 
 const Reactor = hyperia.Reactor;
+const SpinLock = hyperia.sync.SpinLock;
 const AsyncSocket = hyperia.AsyncSocket;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
@@ -50,6 +51,8 @@ pub const Client = struct {
         }
     };
 
+    lock: SpinLock = .{},
+
     address: net.Address,
     reactor: Reactor,
 
@@ -76,15 +79,20 @@ pub const Client = struct {
     }
 
     pub fn acquire(self: *Client) !*Connection {
-        const conn = try self.wga.allocator.create(Connection);
-        errdefer self.wga.allocator.destroy(conn);
+        const held = self.lock.acquire();
+        defer held.release();
 
-        conn.* = .{ .client = self, .socket = undefined, .frame = undefined };
+        if (self.len == 0) {
+            const conn = try self.wga.allocator.create(Connection);
+            errdefer self.wga.allocator.destroy(conn);
 
-        self.pool[self.len] = conn;
-        self.len += 1;
+            conn.* = .{ .client = self, .socket = undefined, .frame = undefined };
 
-        return conn;
+            self.pool[self.len] = conn;
+            self.len += 1;
+        }
+
+        return self.pool[0];
     }
 };
 
