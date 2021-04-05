@@ -333,6 +333,16 @@ pub const Client = struct {
     }
 };
 
+fn runBenchmark(client: *Client) !void {
+    defer log.info("done", .{});
+
+    var i: usize = 0;
+    while (i < 1_000_000) : (i += 1) {
+        var conn = try await async client.fetch();
+        Frame.yield();
+    }
+}
+
 fn runApp(reactor: Reactor) !void {
     defer {
         @atomicStore(bool, &stopped, true, .Release);
@@ -344,15 +354,13 @@ fn runApp(reactor: Reactor) !void {
     var client = try Client.init(hyperia.allocator, reactor, address);
     defer client.deinit(hyperia.allocator);
 
-    var i: usize = 0;
-    while (i < 100) : (i += 1) {
-        var conn = try client.fetch();
-    }
+    var benchmark_frame = async runBenchmark(&client);
+    var ctrl_c_frame = async hyperia.ctrl_c.wait();
 
-    log.info("done", .{});
-
-    hyperia.ctrl_c.wait();
+    await ctrl_c_frame;
+    log.info("got ctrl+c", .{});
     client.close();
+    try await benchmark_frame;
 }
 
 pub fn main() !void {
