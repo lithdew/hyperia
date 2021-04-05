@@ -11,7 +11,9 @@ const os = std.os;
 const mem = std.mem;
 const net = std.net;
 const meta = std.meta;
+
 const log = std.log.scoped(.client);
+const assert = std.debug.assert;
 
 var stopped: bool = false;
 
@@ -67,7 +69,11 @@ pub const Client = struct {
 
             log.info("successfully connected", .{});
 
-            self.socket.deinit();
+            if (self.client.reportDisconnected(self)) {
+                return;
+            }
+
+            self.client.reportConnectError(self, @errorToInt(error.NetworkUnreachable));
         }
 
         fn connect(self: *Connection) !void {
@@ -155,12 +161,9 @@ pub const Client = struct {
             return err;
         };
 
-        switch (result) {
-            .available => |conn| {
-                held.release();
-                return conn;
-            },
-            else => {},
+        if (result == .available) {
+            held.release();
+            return result.available;
         }
 
         var waiter: Waiter = .{ .frame = @frame(), .result = undefined };
@@ -194,12 +197,44 @@ pub const Client = struct {
         self.len -= 1;
     }
 
+    fn reportConnected(self: *Client, conn: *Connection) bool {
+        const batch = collected: {
+            var batch: zap.Pool.Batch = .{};
+
+            const held = self.lock.acquire();
+            defer held.release();
+
+            assert(!conn.connected);
+
+            if (self.status == .closed) {
+                conn.socket.deinit();
+                self.deregister(conn);
+                return false;
+            }
+
+            self.status = .open;
+            conn.connected = true;
+
+            while (self.waiters) |waiter| : (self.waiters = waiter.next) {
+                waiter.result = conn;
+                batch.push(&waiter.runnable);
+            }
+
+            break :collected batch;
+        };
+
+        hyperia.pool.schedule(.{}, batch);
+        return true;
+    }
+
     fn reportConnectError(self: *Client, conn: *Connection, err: meta.Int(.unsigned, @sizeOf(Connection.Error) * 8)) void {
         const batch = collect: {
             var batch: zap.Pool.Batch = .{};
 
             const held = self.lock.acquire();
             defer held.release();
+
+            assert(!conn.connected);
 
             if (self.status != .closed) {
                 self.status = .errored;
@@ -225,32 +260,21 @@ pub const Client = struct {
         hyperia.pool.schedule(.{}, batch);
     }
 
-    fn reportConnected(self: *Client, conn: *Connection) bool {
-        const batch = collected: {
-            var batch: zap.Pool.Batch = .{};
+    fn reportDisconnected(self: *Client, conn: *Connection) bool {
+        const held = self.lock.acquire();
+        defer held.release();
 
-            const held = self.lock.acquire();
-            defer held.release();
+        assert(conn.connected);
+        conn.connected = false;
 
-            if (self.status == .closed) {
-                conn.socket.deinit();
-                self.deregister(conn);
-                return false;
-            }
+        if (self.status == .closed or self.len > 1) {
+            conn.socket.deinit();
+            self.deregister(conn);
+            return true;
+        }
 
-            self.status = .open;
-            conn.connected = true;
-
-            while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-                waiter.result = conn;
-                batch.push(&waiter.runnable);
-            }
-
-            break :collected batch;
-        };
-
-        hyperia.pool.schedule(.{}, batch);
-        return true;
+        conn.socket.deinit();
+        return false;
     }
 };
 
