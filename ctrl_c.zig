@@ -21,7 +21,7 @@ pub fn init() void {
     const sigaction = os.Sigaction{
         .handler = .{ .handler = handler },
         .mask = mask,
-        .flags = os.SA_SIGINFO,
+        .flags = 0,
     };
 
     os.sigaction(os.SIGINT, &sigaction, &last_sigaction);

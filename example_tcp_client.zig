@@ -19,6 +19,21 @@ var stopped: bool = false;
 
 var reactor_event: Reactor.AutoResetEvent = undefined;
 
+pub const Frame = struct {
+    runnable: zap.Pool.Runnable = .{ .runFn = run },
+    frame: anyframe,
+
+    pub fn run(runnable: *zap.Pool.Runnable) void {
+        const self = @fieldParentPtr(Frame, "runnable", runnable);
+        resume self.frame;
+    }
+
+    pub fn yield() void {
+        var frame: Frame = .{ .frame = @frame() };
+        suspend hyperia.pool.schedule(.{}, &frame.runnable);
+    }
+};
+
 pub const Client = struct {
     pub const capacity = 1;
 
@@ -98,6 +113,8 @@ pub const Client = struct {
                 while (i < message.len) {
                     i += try self.socket.send(message[i..], os.MSG_NOSIGNAL);
                 }
+
+                Frame.yield();
             }
         }
 
