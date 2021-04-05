@@ -349,7 +349,7 @@ pub const Client = struct {
     }
 
     fn reportConnected(self: *Client, conn: *Connection) bool {
-        log.info("{*} successfully connected", .{self});
+        log.info("{*} successfully connected", .{conn});
 
         const batch = collected: {
             var batch: zap.Pool.Batch = .{};
@@ -434,7 +434,7 @@ pub const Client = struct {
         conn.connected = false;
         conn.socket.deinit();
 
-        log.info("{*} disconnected", .{self});
+        log.info("{*} disconnected", .{conn});
 
         if (self.status == .closed or self.len > 1) {
             self.deregister(conn);

@@ -14,7 +14,9 @@ pub const SpinLock = struct {
     locked: bool = false,
 
     pub fn acquire(self: *SpinLock) Held {
-        while (@atomicRmw(bool, &self.locked, .Xchg, true, .Acquire)) continue;
+        while (@atomicRmw(bool, &self.locked, .Xchg, true, .Acquire)) {
+            std.Thread.spinLoopHint();
+        }
         return Held{ .self = self };
     }
 };

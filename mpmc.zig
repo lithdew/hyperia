@@ -14,6 +14,25 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     else => 64,
 };
 
+pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        const READY = 0;
+        const CANCELLED = 1;
+
+        queue: Queue(T, capacity),
+
+        pub fn init(allocator: *mem.Allocator) !Self {
+            return Self{ .queue = try Queue(T, capacity).init(allocator) };
+        }
+
+        pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+            self.queue.deinit(allocator);
+        }
+    };
+}
+
 pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
