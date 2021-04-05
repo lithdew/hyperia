@@ -23,7 +23,7 @@ pub const Frame = struct {
     runnable: zap.Pool.Runnable = .{ .runFn = run },
     frame: anyframe,
 
-    pub fn run(runnable: *zap.Pool.Runnable) void {
+    fn run(runnable: *zap.Pool.Runnable) void {
         const self = @fieldParentPtr(Frame, "runnable", runnable);
         resume self.frame;
     }
@@ -73,28 +73,42 @@ pub const Client = struct {
                 suspend self.deinit();
             }
 
-            self.connect() catch |err| {
-                self.client.reportConnectError(self, @errorToInt(err));
-                return err;
-            };
+            var reconnecting = false;
+            var num_attempts: usize = 0;
 
-            if (!self.client.reportConnected(self)) {
-                return;
+            while (true) : (num_attempts += 1) {
+                if (num_attempts > 0) {
+                    log.info("{*} reconnection attempt {}", .{ self, num_attempts });
+                }
+
+                self.connect() catch |err| {
+                    reconnecting = reconnecting and num_attempts < 10;
+                    self.client.reportConnectError(self, reconnecting, @errorToInt(err));
+
+                    if (reconnecting) {
+                        continue;
+                    }
+                    return err;
+                };
+
+                if (!self.client.reportConnected(self)) {
+                    return;
+                }
+
+                reconnecting = false;
+                num_attempts = 0;
+
+                log.info("successfully connected", .{});
+
+                var read_frame = async self.readLoop();
+                var write_frame = async self.writeLoop();
+
+                _ = await read_frame;
+                _ = await write_frame;
+
+                reconnecting = !self.client.reportDisconnected(self);
+                if (!reconnecting) return;
             }
-
-            log.info("successfully connected", .{});
-
-            var read_frame = async self.readLoop();
-            var write_frame = async self.writeLoop();
-
-            _ = await read_frame;
-            _ = await write_frame;
-
-            if (self.client.reportDisconnected(self)) {
-                return;
-            }
-
-            self.client.reportConnectError(self, @errorToInt(error.NetworkUnreachable));
         }
 
         fn readLoop(self: *Connection) !void {
@@ -282,7 +296,7 @@ pub const Client = struct {
         return true;
     }
 
-    fn reportConnectError(self: *Client, conn: *Connection, err: meta.Int(.unsigned, @sizeOf(Connection.Error) * 8)) void {
+    fn reportConnectError(self: *Client, conn: *Connection, reconnecting: bool, err: meta.Int(.unsigned, @sizeOf(Connection.Error) * 8)) void {
         const batch = collect: {
             var batch: zap.Pool.Batch = .{};
 
@@ -301,13 +315,18 @@ pub const Client = struct {
             }
 
             self.status = .errored;
+
+            // If the connection is in a reconnection loop, do not report any
+            // errors and allow the connection to keep attempting to reconnect.
+
+            if (reconnecting) return;
+
+            // Only the last pooled connection reports an error. Terminate and
+            // deregister the connection from the pool of connections that this
+            // client holds.
+
             self.deregister(conn);
-
-            // Only the last pooled connection reports an error.
-
-            if (self.len > 0) {
-                return;
-            }
+            if (self.len > 1) return;
 
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
                 waiter.result = @errSetCast(Connection.Error, @intToError(err));
