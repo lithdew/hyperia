@@ -38,7 +38,7 @@ pub const Frame = struct {
 };
 
 pub const Client = struct {
-    pub const capacity = 1;
+    pub const capacity = 4;
 
     pub const Status = enum {
         open,
@@ -115,6 +115,7 @@ pub const Client = struct {
                 var write_frame = async self.writeLoop();
 
                 _ = await read_frame;
+                self.queue.cancel();
                 _ = await write_frame;
 
                 reconnecting = !self.client.reportDisconnected(self);
@@ -123,6 +124,7 @@ pub const Client = struct {
         }
 
         fn readLoop(self: *Connection) !void {
+            defer log.info("{*} read loop ended", .{self});
             var buf: [1024]u8 = undefined;
             while (true) {
                 const num_bytes = try self.socket.read(&buf);
@@ -131,6 +133,8 @@ pub const Client = struct {
         }
 
         fn writeLoop(self: *Connection) !void {
+            defer log.info("{*} write loop ended", .{self});
+
             var first: *mpsc.Queue([]const u8).Node = undefined;
             var last: *mpsc.Queue([]const u8).Node = undefined;
 
@@ -213,6 +217,7 @@ pub const Client = struct {
         for (self.pool[0..self.len]) |conn| {
             if (conn.connected) {
                 conn.socket.shutdown(.both) catch {};
+                log.info("{*} signalled to shutdown", .{conn});
             }
         }
     }
