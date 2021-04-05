@@ -88,6 +88,7 @@ pub const Client = struct {
                     if (reconnecting) {
                         continue;
                     }
+
                     return err;
                 };
 
@@ -95,10 +96,7 @@ pub const Client = struct {
                     return;
                 }
 
-                reconnecting = false;
                 num_attempts = 0;
-
-                log.info("successfully connected", .{});
 
                 var read_frame = async self.readLoop();
                 var write_frame = async self.writeLoop();
@@ -267,6 +265,8 @@ pub const Client = struct {
     }
 
     fn reportConnected(self: *Client, conn: *Connection) bool {
+        log.info("{*} successfully connected", .{self});
+
         const batch = collected: {
             var batch: zap.Pool.Batch = .{};
 
@@ -345,14 +345,15 @@ pub const Client = struct {
 
         assert(conn.connected);
         conn.connected = false;
+        conn.socket.deinit();
+
+        log.info("{*} disconnected", .{self});
 
         if (self.status == .closed or self.len > 1) {
-            conn.socket.deinit();
             self.deregister(conn);
             return true;
         }
 
-        conn.socket.deinit();
         return false;
     }
 };
