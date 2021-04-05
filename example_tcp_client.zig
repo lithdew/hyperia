@@ -69,11 +69,21 @@ pub const Client = struct {
 
             log.info("successfully connected", .{});
 
+            self.readLoop() catch {};
+
             if (self.client.reportDisconnected(self)) {
                 return;
             }
 
             self.client.reportConnectError(self, @errorToInt(error.NetworkUnreachable));
+        }
+
+        fn readLoop(self: *Connection) !void {
+            var buf: [1024]u8 = undefined;
+            while (true) {
+                const num_bytes = try self.socket.read(&buf);
+                if (num_bytes == 0) return;
+            }
         }
 
         fn connect(self: *Connection) !void {
@@ -118,6 +128,19 @@ pub const Client = struct {
     pub fn deinit(self: *Client, allocator: *mem.Allocator) void {
         self.wga.wait();
         allocator.destroy(@ptrCast(*const [capacity]*Connection, self.pool));
+    }
+
+    pub fn close(self: *Client) void {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        self.status = .closed;
+
+        for (self.pool[0..self.len]) |conn| {
+            if (conn.connected) {
+                conn.socket.shutdown(.both) catch {};
+            }
+        }
     }
 
     pub const FetchResult = union(enum) {
@@ -284,7 +307,9 @@ fn runApp(reactor: Reactor) !void {
         reactor_event.post();
     }
 
-    var client = try Client.init(hyperia.allocator, reactor, net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000));
+    const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 9000);
+
+    var client = try Client.init(hyperia.allocator, reactor, address);
     defer client.deinit(hyperia.allocator);
 
     var i: usize = 0;
@@ -295,6 +320,7 @@ fn runApp(reactor: Reactor) !void {
     log.info("done", .{});
 
     hyperia.ctrl_c.wait();
+    client.close();
 }
 
 pub fn main() !void {
