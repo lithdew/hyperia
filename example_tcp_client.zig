@@ -291,6 +291,11 @@ pub const Client = struct {
 
             assert(!conn.connected);
 
+            log.info("{*} got an error while connecting: {}", .{
+                conn,
+                @errSetCast(Connection.Error, @intToError(err)),
+            });
+
             if (self.status != .closed) {
                 self.status = .errored;
             }
@@ -338,7 +343,10 @@ fn runBenchmark(client: *Client) !void {
 
     var i: usize = 0;
     while (i < 1_000_000) : (i += 1) {
-        var conn = try await async client.fetch();
+        var conn = await async client.fetch() catch |err| switch (err) {
+            error.Closed => return,
+            else => return err,
+        };
         Frame.yield();
     }
 }

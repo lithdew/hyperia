@@ -20,6 +20,7 @@ pub const Signal = struct {
 
     const EMPTY = 0;
     const CLOSED = 1;
+    const NOTIFIED = 2;
 
     state: usize = EMPTY,
 
@@ -39,13 +40,19 @@ pub const Signal = struct {
                         hyperia.pool.schedule(.{}, &node.runnable);
                         break;
                     },
+                    NOTIFIED => EMPTY,
                     else => update: {
                         node.next = @intToPtr(?*Node, state);
                         break :update @ptrToInt(&node);
                     },
                 };
 
-                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Monotonic) orelse break;
+                state = @cmpxchgWeak(usize, &self.state, state, new_state, .Release, .Monotonic) orelse {
+                    if (state == NOTIFIED) {
+                        hyperia.pool.schedule(.{}, &node.runnable);
+                    }
+                    break;
+                };
             }
         }
     }
@@ -54,7 +61,7 @@ pub const Signal = struct {
         var batch: zap.Pool.Batch = .{};
 
         const state = @atomicRmw(usize, &self.state, .Xchg, CLOSED, .AcqRel);
-        if (state == EMPTY or state == CLOSED) return batch;
+        if (state == EMPTY or state == NOTIFIED or state == CLOSED) return batch;
 
         var it = @intToPtr(?*Node, state);
         while (it) |node| : (it = node.next) {
@@ -70,8 +77,8 @@ pub const Signal = struct {
         var state = @atomicLoad(usize, &self.state, .Monotonic);
         while (true) {
             const new_state = switch (state) {
-                EMPTY, CLOSED => return batch,
-                else => @as(usize, EMPTY),
+                NOTIFIED, CLOSED => return batch,
+                else => @as(usize, NOTIFIED),
             };
 
             state = @cmpxchgWeak(usize, &self.state, state, new_state, .Acquire, .Monotonic) orelse {
