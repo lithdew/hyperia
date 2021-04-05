@@ -69,6 +69,20 @@ pub const Client = struct {
         queue: mpsc.AsyncQueue([]const u8) = .{},
 
         pub fn deinit(self: *Connection) void {
+            var first: *mpsc.Queue([]const u8).Node = undefined;
+            var last: *mpsc.Queue([]const u8).Node = undefined;
+
+            while (true) {
+                var num_items = self.queue.tryPopBatch(&first, &last);
+                if (num_items == 0) break;
+
+                while (num_items > 0) : (num_items -= 1) {
+                    const next = first.next;
+                    node_pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+                }
+            }
+
             self.client.wga.allocator.destroy(self);
         }
 
@@ -117,15 +131,32 @@ pub const Client = struct {
         }
 
         fn writeLoop(self: *Connection) !void {
-            const message = "message\n";
+            var first: *mpsc.Queue([]const u8).Node = undefined;
+            var last: *mpsc.Queue([]const u8).Node = undefined;
 
             while (true) {
-                var i: usize = 0;
-                while (i < message.len) {
-                    i += try self.socket.send(message[i..], os.MSG_NOSIGNAL);
-                }
+                const num_items = await async self.queue.popBatch(&first, &last);
+                if (num_items == 0) return;
 
-                Frame.yield();
+                var i: usize = 0;
+                defer while (i < num_items) : (i += 1) {
+                    const next = first.next;
+                    node_pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+                };
+
+                while (i < num_items) : (i += 1) {
+                    var j: usize = 0;
+                    while (j < first.value.len) {
+                        j += try self.socket.send(first.value[j..], os.MSG_NOSIGNAL);
+                    }
+
+                    const next = first.next;
+                    node_pool.release(hyperia.allocator, first);
+                    first = next orelse continue;
+
+                    Frame.yield();
+                }
             }
         }
 
@@ -184,6 +215,14 @@ pub const Client = struct {
                 conn.socket.shutdown(.both) catch {};
             }
         }
+    }
+
+    pub fn write(self: *Client, buf: []const u8) !void {
+        const conn = try self.fetch();
+
+        const node = try node_pool.acquire(hyperia.allocator);
+        node.* = .{ .value = buf };
+        conn.queue.push(node);
     }
 
     /// Lock must be held. Allocates a new connection and registers it
@@ -404,10 +443,11 @@ fn runBenchmark(client: *Client) !void {
 
     var i: usize = 0;
     while (i < 1_000_000) : (i += 1) {
-        var conn = await async client.fetch() catch |err| switch (err) {
+        await async client.write("message\n") catch |err| switch (err) {
             error.Closed => return,
             else => return err,
         };
+
         Frame.yield();
     }
 }
