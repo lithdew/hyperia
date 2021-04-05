@@ -17,6 +17,8 @@ const mpsc = hyperia.mpsc;
 const log = std.log.scoped(.client);
 const assert = std.debug.assert;
 
+pub const log_level = .debug;
+
 var stopped: bool = false;
 
 var reactor_event: Reactor.AutoResetEvent = undefined;
@@ -159,8 +161,10 @@ pub const Client = struct {
                     node_pool.release(hyperia.allocator, first);
                     first = next orelse continue;
 
-                    Frame.yield();
+                    if (i % 1_000 == 0) Frame.yield();
                 }
+
+                Frame.yield();
             }
         }
 
@@ -447,13 +451,13 @@ fn runBenchmark(client: *Client) !void {
     defer log.info("done", .{});
 
     var i: usize = 0;
-    while (i < 1_000_000) : (i += 1) {
+    while (true) : (i +%= 1) {
         await async client.write("message\n") catch |err| switch (err) {
             error.Closed => return,
             else => return err,
         };
 
-        Frame.yield();
+        if (i % 50 == 0) Frame.yield();
     }
 }
 
