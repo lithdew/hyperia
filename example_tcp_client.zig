@@ -69,7 +69,11 @@ pub const Client = struct {
 
             log.info("successfully connected", .{});
 
-            self.readLoop() catch {};
+            var read_frame = async self.readLoop();
+            var write_frame = async self.writeLoop();
+
+            _ = await read_frame;
+            _ = await write_frame;
 
             if (self.client.reportDisconnected(self)) {
                 return;
@@ -83,6 +87,17 @@ pub const Client = struct {
             while (true) {
                 const num_bytes = try self.socket.read(&buf);
                 if (num_bytes == 0) return;
+            }
+        }
+
+        fn writeLoop(self: *Connection) !void {
+            const message = "message\n";
+
+            while (true) {
+                var i: usize = 0;
+                while (i < message.len) {
+                    i += try self.socket.send(message[i..], os.MSG_NOSIGNAL);
+                }
             }
         }
 
