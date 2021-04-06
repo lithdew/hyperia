@@ -70,7 +70,7 @@ pub const AsyncAutoResetEvent = struct {
     pub fn cancel(self: *Self) bool {
         var state = @atomicLoad(u64, &self.state, .Monotonic);
         while (true) {
-            if (getWaiterCount(state) == 0) return false;
+            if (getSetterCount(state) >= getWaiterCount(state)) return false;
 
             state = @cmpxchgWeak(
                 u64,
