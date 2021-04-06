@@ -40,11 +40,11 @@ pub const AsyncAutoResetEvent = struct {
     waiters: ?*Waiter = null,
     new_waiters: ?*Waiter = null,
 
-    fn getSetterCount(state: u64) u32 {
-        return @intCast(u32, state & math.maxInt(u32));
+    fn getSetterCount(state: u64) callconv(.Inline) u32 {
+        return @truncate(u32, state);
     }
 
-    fn getWaiterCount(state: u64) u32 {
+    fn getWaiterCount(state: u64) callconv(.Inline) u32 {
         return @intCast(u32, state >> 32);
     }
 
@@ -186,6 +186,10 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
             return self.queue.tryPop();
         }
 
+        pub fn count(self: *Self) usize {
+            return self.queue.count();
+        }
+
         pub fn push(self: *Self, item: T) void {
             while (!self.tryPush(item)) {
                 self.producer_event.wait();
@@ -194,7 +198,7 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
             self.consumer_event.set();
         }
 
-        pub fn pop(self: *Self) void {
+        pub fn pop(self: *Self) T {
             while (true) {
                 if (self.tryPop()) |item| {
                     self.producer_event.set();
@@ -232,6 +236,12 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
 
         pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
             allocator.destroy(@ptrCast(*const [capacity]Entry, self.entries));
+        }
+
+        pub fn count(self: *Self) usize {
+            const tail = @atomicLoad(usize, &self.dequeue_pos, .Monotonic);
+            const head = @atomicLoad(usize, &self.enqueue_pos, .Monotonic);
+            return (tail -% head) % (capacity - 1);
         }
 
         pub fn tryPush(self: *Self, item: T) bool {
