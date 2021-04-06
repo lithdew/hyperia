@@ -175,6 +175,7 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
         const CANCELLED = 1;
 
         queue: Queue(T, capacity),
+        closed: bool = false,
         producer_event: AsyncAutoResetEvent = .{},
         consumer_event: AsyncAutoResetEvent = .{},
 
@@ -198,22 +199,37 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
             return self.queue.count();
         }
 
-        pub fn push(self: *Self, item: T) void {
-            while (!self.tryPush(item)) {
-                self.producer_event.wait();
+        pub fn close(self: *Self) void {
+            @atomicStore(bool, &self.closed, true, .Monotonic);
+            while (true) {
+                var batch: zap.Pool.Batch = .{};
+                batch.push(self.producer_event.set());
+                batch.push(self.consumer_event.set());
+                if (batch.isEmpty()) break;
+                hyperia.pool.schedule(.{}, batch);
             }
-
-            self.consumer_event.set();
         }
 
-        pub fn pop(self: *Self) T {
-            while (true) {
+        pub fn push(self: *Self, item: T) bool {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
+                if (self.tryPush(item)) {
+                    hyperia.pool.schedule(.{}, self.consumer_event.set());
+                    return true;
+                }
+                self.producer_event.wait();
+            }
+            return false;
+        }
+
+        pub fn pop(self: *Self) ?T {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
                 if (self.tryPop()) |item| {
-                    self.producer_event.set();
+                    hyperia.pool.schedule(.{}, self.producer_event.set());
                     return item;
                 }
                 self.consumer_event.wait();
             }
+            return null;
         }
     };
 }
@@ -302,6 +318,8 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
 
 test {
     testing.refAllDecls(@This());
+    testing.refAllDecls(Queue(u64, 128));
+    testing.refAllDecls(AsyncQueue(u64, 128));
 }
 
 test "mpmc/auto_reset_event: set and wait" {
