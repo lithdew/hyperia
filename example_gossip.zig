@@ -603,7 +603,7 @@ pub const Node = struct {
             const Cases = struct {
                 write: struct {
                     run: Case(Connection.writeLoop),
-                    cancel: Case(mpsc.AsyncSink([]const u8).cancel),
+                    cancel: Case(mpsc.AsyncSink([]const u8).close),
                 },
                 read: struct {
                     run: Case(Connection.readLoop),
@@ -615,7 +615,7 @@ pub const Node = struct {
                 Cases{
                     .write = .{
                         .run = call(Connection.writeLoop, .{self}),
-                        .cancel = call(mpsc.AsyncSink([]const u8).cancel, .{&self.queue}),
+                        .cancel = call(mpsc.AsyncSink([]const u8).close, .{&self.queue}),
                     },
                     .read = .{
                         .run = call(Connection.readLoop, .{self}),
