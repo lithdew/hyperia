@@ -112,14 +112,15 @@ pub fn AsyncQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        const READY = 0;
-        const CANCELLED = 1;
-
         queue: Queue(T) = .{},
-        event: AsyncAutoResetEvent(usize) = .{},
+        closed: bool = false,
+        event: AsyncAutoResetEvent(void) = .{},
 
-        pub fn cancel(self: *Self) void {
-            if (self.event.set(CANCELLED)) |runnable| {
+        pub fn close(self: *Self) void {
+            @atomicStore(bool, &self.closed, true, .Monotonic);
+
+            while (true) {
+                const runnable = self.event.set() orelse break;
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -131,7 +132,7 @@ pub fn AsyncQueue(comptime T: type) type {
         pub fn push(self: *Self, src: *Queue(T).Node) void {
             self.queue.tryPush(src);
 
-            if (self.event.set(READY)) |runnable| {
+            if (self.event.set()) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -139,7 +140,7 @@ pub fn AsyncQueue(comptime T: type) type {
         pub fn pushBatch(self: *Self, first: *Queue(T).Node, last: *Queue(T).Node, count: usize) void {
             self.queue.tryPushBatch(first, last, count);
 
-            if (self.event.set(READY)) |runnable| {
+            if (self.event.set()) |runnable| {
                 hyperia.pool.schedule(.{}, runnable);
             }
         }
@@ -148,32 +149,30 @@ pub fn AsyncQueue(comptime T: type) type {
             return self.queue.tryPop();
         }
 
-        pub fn pop(self: *Self) ?*Queue(T).Node {
-            while (true) {
-                return self.tryPop() orelse {
-                    if (self.event.wait() == CANCELLED) {
-                        return null;
-                    }
-                    continue;
-                };
-            }
-        }
-
         pub fn tryPopBatch(self: *Self, b_first: **Queue(T).Node, b_last: **Queue(T).Node) usize {
             return self.queue.tryPopBatch(b_first, b_last);
         }
 
+        pub fn pop(self: *Self) ?*Queue(T).Node {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
+                return self.tryPop() orelse {
+                    self.event.wait();
+                    continue;
+                };
+            }
+            return null;
+        }
+
         pub fn popBatch(self: *Self, b_first: **Queue(T).Node, b_last: **Queue(T).Node) callconv(.Async) usize {
-            while (true) {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
                 const num_items = self.tryPopBatch(b_first, b_last);
                 if (num_items == 0) {
-                    if (self.event.wait() == CANCELLED) {
-                        return 0;
-                    }
+                    self.event.wait();
                     continue;
                 }
                 return num_items;
             }
+            return 0;
         }
     };
 }

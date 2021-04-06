@@ -117,7 +117,7 @@ pub const Client = struct {
                 var write_frame = async self.writeLoop();
 
                 _ = await read_frame;
-                self.queue.cancel();
+                self.queue.close();
                 _ = await write_frame;
 
                 reconnecting = !self.client.reportDisconnected(self);

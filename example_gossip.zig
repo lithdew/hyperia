@@ -177,7 +177,7 @@ pub const Client = struct {
         }
 
         fn cancelWrites(self: *Connection) void {
-            self.queue.cancel();
+            self.queue.close();
             self.socket.cancel(.write);
         }
 

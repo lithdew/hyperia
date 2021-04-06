@@ -171,9 +171,6 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
 
-        const READY = 0;
-        const CANCELLED = 1;
-
         queue: Queue(T, capacity),
         closed: bool = false,
         producer_event: AsyncAutoResetEvent = .{},
