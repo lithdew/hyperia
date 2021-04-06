@@ -15,10 +15,7 @@ const SpinLock = hyperia.sync.SpinLock;
 const Timer = @This();
 
 pub const Handle = struct {
-    pub const DONE = 0;
-    pub const CANCELLED = 1;
-
-    event: mpsc.AsyncAutoResetEvent(usize) = .{},
+    event: mpsc.AsyncAutoResetEvent(void) = .{},
     expires_at: usize = 0,
 
     pub fn start(self: *Timer.Handle, timer: *Timer, expires_at: usize) !void {
@@ -30,18 +27,15 @@ pub const Handle = struct {
 
     pub fn cancel(self: *Timer, Handle, timer: *Timer) void {
         if (!timer.cancel(self)) return;
-
-        if (self.event.set(CANCELLED)) |runnable| {
-            hyperia.pool.schedule(.{}, runnable);
-        }
+        hyperia.pool.schedule(.{}, self.set());
     }
 
-    pub fn wait(self: *Timer.Handle) bool {
-        return self.event.wait() == DONE;
+    pub fn wait(self: *Timer.Handle) void {
+        return self.event.wait();
     }
 
     pub fn set(self: *Timer.Handle) ?*zap.Pool.Runnable {
-        return self.event.set(DONE);
+        return self.event.set();
     }
 };
 
@@ -139,9 +133,9 @@ test "timer/async: add timers and execute them" {
         }{ .batch = &batch });
     }
 
-    testing.expect(nosuspend await fa);
-    testing.expect(nosuspend await fb);
-    testing.expect(nosuspend await fc);
+    nosuspend await fa;
+    nosuspend await fb;
+    nosuspend await fc;
 }
 
 test "timer: add timers and update latest time" {

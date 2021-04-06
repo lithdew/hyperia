@@ -114,6 +114,7 @@ pub const Client = struct {
 
         fn readLoop(self: *Connection) !void {
             defer log.info("{*} read loop ended", .{self});
+
             var buf: [1024]u8 = undefined;
             while (true) {
                 const num_bytes = try self.socket.read(&buf);
