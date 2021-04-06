@@ -251,6 +251,7 @@ pub const Client = struct {
 
         for (pool) |conn| {
             if (!conn.connected) continue;
+            self.status = .open;
             return PoolResult.available;
         }
 

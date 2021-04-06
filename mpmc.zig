@@ -63,6 +63,26 @@ pub const AsyncAutoResetEvent = struct {
         self.park();
     }
 
+    /// Cancels a waiter so that the waiter may be manually resumed.
+    /// Returns true if the waiter may be manually resumed, and false
+    /// otherwise because a setter appears to have already resumed
+    /// the waiter.
+    pub fn cancel(self: *Self) bool {
+        var state = @atomicLoad(u64, &self.state, .Monotonic);
+        while (true) {
+            if (getWaiterCount(state) == 0) return false;
+
+            state = @cmpxchgWeak(
+                u64,
+                &self.state,
+                state,
+                state - waiter_increment,
+                .AcqRel,
+                .Acquire,
+            ) orelse return true;
+        }
+    }
+
     pub fn set(self: *Self) zap.Pool.Batch {
         var state = @atomicLoad(u64, &self.state, .Monotonic);
         while (true) {
