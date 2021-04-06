@@ -3,10 +3,9 @@ const hyperia = @import("hyperia.zig");
 
 const os = std.os;
 const mem = std.mem;
+const mpmc = hyperia.mpmc;
 
-const oneshot = hyperia.oneshot;
-
-var signal: oneshot.Signal = .{};
+var event: mpmc.AsyncAutoResetEvent = .{};
 
 var last_sigaction: os.Sigaction = .{
     .handler = .{ .handler = null },
@@ -29,22 +28,29 @@ pub fn init() void {
 
 pub fn deinit() void {
     os.sigaction(os.SIGINT, &last_sigaction, null);
-    hyperia.pool.schedule(.{}, signal.close());
-
-    signal = .{};
+    cancel();
 }
 
 pub fn wait() void {
-    signal.wait();
+    event.wait();
 }
 
 pub fn cancel() void {
-    hyperia.pool.schedule(.{}, signal.set());
+    while (true) {
+        var batch = event.set();
+        if (batch.isEmpty()) break;
+        hyperia.pool.schedule(.{}, batch);
+    }
 }
 
 fn handler(signum: c_int) callconv(.C) void {
     if (signum != os.SIGINT) return;
-    hyperia.pool.schedule(.{}, signal.set());
+
+    while (true) {
+        var batch = event.set();
+        if (batch.isEmpty()) break;
+        hyperia.pool.schedule(.{}, batch);
+    }
 }
 
 test "ctrl_c: manually raise ctrl+c event" {
