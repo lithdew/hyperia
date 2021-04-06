@@ -63,10 +63,10 @@ pub const AsyncAutoResetEvent = struct {
         self.park();
     }
 
-    pub fn set(self: *Self) void {
+    pub fn set(self: *Self) zap.Pool.Batch {
         var state = @atomicLoad(u64, &self.state, .Monotonic);
         while (true) {
-            if (getSetterCount(state) > getWaiterCount(state)) return;
+            if (getSetterCount(state) > getWaiterCount(state)) return .{};
 
             state = @cmpxchgWeak(
                 u64,
@@ -79,8 +79,10 @@ pub const AsyncAutoResetEvent = struct {
         }
 
         if (getSetterCount(state) == 0 and getWaiterCount(state) > 0) {
-            self.unpark(state + setter_increment);
+            return self.unpark(state + setter_increment);
         }
+
+        return .{};
     }
 
     fn park(self: *Self) void {
@@ -101,18 +103,22 @@ pub const AsyncAutoResetEvent = struct {
                 ) orelse break;
             }
 
+            var batch: zap.Pool.Batch = .{};
+            defer hyperia.pool.schedule(.{}, batch);
+
             var state = @atomicRmw(u64, &self.state, .Add, waiter_increment, .AcqRel);
             if (getSetterCount(state) > 0 and getWaiterCount(state) == 0) {
-                self.unpark(state + waiter_increment);
+                batch.push(self.unpark(state + waiter_increment));
             }
 
             if (@atomicRmw(u32, &waiter.refs, .Sub, 1, .Acquire) == 1) {
-                hyperia.pool.schedule(.{}, &waiter.runnable);
+                batch.push(&waiter.runnable);
             }
         }
     }
 
-    fn unpark(self: *Self, state: u64) void {
+    fn unpark(self: *Self, state: u64) zap.Pool.Batch {
+        var batch: zap.Pool.Batch = .{};
         var waiters_to_resume: ?*Waiter = null;
         var waiters_to_resume_tail: *?*Waiter = &waiters_to_resume;
 
@@ -152,10 +158,12 @@ pub const AsyncAutoResetEvent = struct {
         while (waiters_to_resume) |waiter| {
             const next = waiter.next;
             if (@atomicRmw(u32, &waiter.refs, .Sub, 1, .Release) == 1) {
-                hyperia.pool.schedule(.{}, &waiter.runnable);
+                batch.push(&waiter.runnable);
             }
             waiters_to_resume = next;
         }
+
+        return batch;
     }
 };
 
@@ -302,9 +310,9 @@ test "mpmc/auto_reset_event: set and wait" {
 
     var event: AsyncAutoResetEvent = .{};
 
-    event.set();
-    event.set();
-    event.set();
+    testing.expect(event.set().isEmpty());
+    testing.expect(event.set().isEmpty());
+    testing.expect(event.set().isEmpty());
     testing.expect(AsyncAutoResetEvent.getSetterCount(event.state) == 1);
     nosuspend event.wait();
     testing.expect(AsyncAutoResetEvent.getSetterCount(event.state) == 0);
@@ -316,17 +324,17 @@ test "mpmc/auto_reset_event: set and wait" {
     var c = async event.wait();
     testing.expect(AsyncAutoResetEvent.getWaiterCount(event.state) == 3);
 
-    event.set();
+    event.set().pop().?.run();
     testing.expect(AsyncAutoResetEvent.getSetterCount(event.state) == 0);
     testing.expect(AsyncAutoResetEvent.getWaiterCount(event.state) == 2);
     nosuspend await a;
 
-    event.set();
+    event.set().pop().?.run();
     testing.expect(AsyncAutoResetEvent.getSetterCount(event.state) == 0);
     testing.expect(AsyncAutoResetEvent.getWaiterCount(event.state) == 1);
     nosuspend await b;
 
-    event.set();
+    event.set().pop().?.run();
     testing.expect(AsyncAutoResetEvent.getSetterCount(event.state) == 0);
     testing.expect(AsyncAutoResetEvent.getWaiterCount(event.state) == 0);
     nosuspend await c;
