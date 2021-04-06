@@ -2,9 +2,10 @@ const std = @import("std");
 const zap = @import("zap");
 const hyperia = @import("hyperia");
 
+const Timer = hyperia.Timer;
 const Reactor = hyperia.Reactor;
-const ObjectPool = hyperia.ObjectPool;
 const SpinLock = hyperia.sync.SpinLock;
+
 const AsyncSocket = hyperia.AsyncSocket;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
@@ -12,6 +13,7 @@ const os = std.os;
 const mem = std.mem;
 const net = std.net;
 const meta = std.meta;
+const time = std.time;
 const mpmc = hyperia.mpmc;
 
 const log = std.log.scoped(.client);
@@ -20,8 +22,10 @@ const assert = std.debug.assert;
 pub const log_level = .debug;
 
 var stopped: bool = false;
+var clock: time.Timer = undefined;
 
 var reactor_event: Reactor.AutoResetEvent = undefined;
+var timer: Timer = undefined;
 
 pub const Frame = struct {
     runnable: zap.Pool.Runnable = .{ .runFn = run },
@@ -267,7 +271,7 @@ pub const Client = struct {
 
         if (result == .available) {
             held.release();
-            return result.available;
+            return {};
         }
 
         var waiter: Waiter = .{ .frame = @frame() };
@@ -440,6 +444,11 @@ pub fn main() !void {
     hyperia.ctrl_c.init();
     defer hyperia.ctrl_c.deinit();
 
+    clock = try time.Timer.start();
+
+    timer = Timer.init(hyperia.allocator);
+    defer timer.deinit(hyperia.allocator);
+
     const reactor = try Reactor.init(os.EPOLL_CLOEXEC);
     defer reactor.deinit();
 
@@ -461,7 +470,15 @@ pub fn main() !void {
                 const handle = @intToPtr(*Reactor.Handle, event.data);
                 handle.call(self.batch, event);
             }
-        }{ .batch = &batch }, null);
+        }{ .batch = &batch }, timer.delay(clock.read()));
+
+        timer.update(clock.read(), struct {
+            batch: *zap.Pool.Batch,
+
+            pub fn call(self: @This(), handle: *Timer.Handle) void {
+                self.batch.push(handle.set());
+            }
+        }{ .batch = &batch });
     }
 
     try nosuspend await frame;

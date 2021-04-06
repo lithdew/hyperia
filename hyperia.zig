@@ -8,6 +8,7 @@ const testing = std.testing;
 
 const assert = std.debug.assert;
 
+pub const net = @import("net.zig");
 pub const sync = @import("sync.zig");
 pub const mpsc = @import("mpsc.zig");
 pub const mpmc = @import("mpmc.zig");
@@ -18,14 +19,12 @@ pub const select = @import("select.zig");
 
 pub const ObjectPool = @import("object_pool.zig").ObjectPool;
 
+pub const Timer = @import("Timer.zig");
 pub const Reactor = @import("reactor.zig").Reactor;
 pub const Socket = @import("socket.zig").Socket;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
 pub const AsyncWaitGroup = @import("async_wait_group.zig").AsyncWaitGroup;
 pub const AsyncWaitGroupAllocator = @import("async_wait_group_allocator.zig").AsyncWaitGroupAllocator;
-
-pub const Timer = @import("time.zig").Timer;
-pub const TimerQueue = @import("time.zig").Queue;
 
 pub var gpa: heap.GeneralPurposeAllocator(.{}) = undefined;
 pub var allocator: *mem.Allocator = undefined;
