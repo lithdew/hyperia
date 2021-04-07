@@ -43,6 +43,8 @@ pub const Frame = struct {
 };
 
 pub const Client = struct {
+    pub const WriteQueue = mpmc.AsyncQueue([]const u8, 4096);
+
     pub const capacity = 4;
 
     pub const Status = enum {
@@ -101,10 +103,13 @@ pub const Client = struct {
 
                 num_attempts = 0;
 
+                var popper = self.client.queue.popper();
+
                 var read_frame = async self.readLoop();
-                var write_frame = async self.writeLoop();
+                var write_frame = async self.writeLoop(&popper);
 
                 _ = await read_frame;
+                hyperia.pool.schedule(.{}, popper.cancel());
                 _ = await write_frame;
 
                 reconnecting = !self.client.reportDisconnected(self);
@@ -122,11 +127,11 @@ pub const Client = struct {
             }
         }
 
-        fn writeLoop(self: *Connection) !void {
+        fn writeLoop(self: *Connection, popper: *WriteQueue.Popper) !void {
             defer log.info("{*} write loop ended", .{self});
 
             while (true) {
-                const buf = self.client.queue.pop() orelse return;
+                const buf = popper.pop() orelse return;
 
                 var i: usize = 0;
                 while (i < buf.len) {
@@ -160,7 +165,7 @@ pub const Client = struct {
     pool: [*]*Connection,
     len: usize = 0,
 
-    queue: mpmc.AsyncQueue([]const u8, 4096),
+    queue: WriteQueue,
     wga: AsyncWaitGroupAllocator,
     waiters: ?*Waiter = null,
     status: Status = .open,
@@ -169,7 +174,7 @@ pub const Client = struct {
         const pool = try allocator.create([capacity]*Connection);
         errdefer allocator.destroy(pool);
 
-        const queue = try mpmc.AsyncQueue([]const u8, 4096).init(allocator);
+        const queue = try WriteQueue.init(allocator);
         errdefer queue.deinit(allocator);
 
         return Client{
@@ -205,7 +210,7 @@ pub const Client = struct {
 
     pub fn write(self: *Client, buf: []const u8) !void {
         try self.ensureConnectionAvailable();
-        if (!self.queue.push(buf)) return error.Closed;
+        if (!self.queue.pusher().push(buf)) return error.Closed;
     }
 
     /// Lock must be held. Allocates a new connection and registers it
@@ -228,14 +233,15 @@ pub const Client = struct {
 
     pub const PoolResult = union(enum) {
         available: void,
-        spawned: *Connection,
+        spawned_pending: *Connection,
+        spawned_available: *Connection,
         pending: void,
     };
 
     fn queryPool(self: *Client) !PoolResult {
         if (self.len == 0) {
             self.status = .open;
-            return PoolResult{ .spawned = try self.spawn() };
+            return PoolResult{ .spawned_pending = try self.spawn() };
         }
 
         const pool = self.pool[0..self.len];
@@ -245,12 +251,18 @@ pub const Client = struct {
             return PoolResult.available;
         }
 
+        const any_connected = for (pool) |conn| {
+            if (conn.connected) break true;
+        } else false;
+
         if (pool.len < capacity and self.status != .errored) {
-            return PoolResult{ .spawned = try self.spawn() };
+            if (any_connected) {
+                return PoolResult{ .spawned_available = try self.spawn() };
+            }
+            return PoolResult{ .spawned_pending = try self.spawn() };
         }
 
-        for (pool) |conn| {
-            if (!conn.connected) continue;
+        if (any_connected) {
             self.status = .open;
             return PoolResult.available;
         }
@@ -273,7 +285,13 @@ pub const Client = struct {
 
         if (result == .available) {
             held.release();
-            return {};
+            return;
+        }
+
+        if (result == .spawned_available) {
+            held.release();
+            result.spawned_available.frame = async result.spawned_available.run();
+            return;
         }
 
         var waiter: Waiter = .{ .frame = @frame() };
@@ -283,8 +301,8 @@ pub const Client = struct {
             self.waiters = &waiter;
             held.release();
 
-            if (result == .spawned) {
-                result.spawned.frame = async result.spawned.run();
+            if (result == .spawned_pending) {
+                result.spawned_pending.frame = async result.spawned_pending.run();
             }
         }
 
@@ -373,10 +391,15 @@ pub const Client = struct {
             // client holds.
 
             self.deregister(conn);
-            if (self.len > 1) return;
+
+            const any_connected = for (self.pool[0..self.len]) |pooled_conn| {
+                if (pooled_conn.connected) break true;
+            } else false;
+
+            // if (self.len > 1) return;
 
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-                waiter.result = @errSetCast(Connection.Error, @intToError(err));
+                waiter.result = if (any_connected) {} else @errSetCast(Connection.Error, @intToError(err));
                 batch.push(&waiter.runnable);
             }
 

@@ -187,14 +187,131 @@ pub const AsyncAutoResetEvent = struct {
     }
 };
 
+pub const Event = struct {
+    const Self = @This();
+
+    pub const State = enum {
+        unset,
+        set,
+    };
+
+    pub const Waiter = struct {
+        runnable: zap.Pool.Runnable = .{ .runFn = run },
+        frame: anyframe,
+
+        parent: *Event,
+        prev: ?*Waiter = null,
+        next: ?*Waiter = null,
+        cancelled: bool = false,
+
+        fn run(runnable: *zap.Pool.Runnable) void {
+            const self = @fieldParentPtr(Waiter, "runnable", runnable);
+            resume self.frame;
+        }
+
+        pub fn cancel(self: *Waiter) ?*zap.Pool.Runnable {
+            const runnable = collect: {
+                const held = self.parent.lock.acquire();
+                defer held.release();
+
+                if (self.cancelled) return null;
+
+                self.cancelled = true;
+
+                if (self.prev == null and self.next == null) return null;
+                if (self.parent.waiters == self) return null;
+
+                if (self.prev) |prev| {
+                    prev.next = self.next;
+                    self.prev = null;
+                } else {
+                    self.parent.waiters = self.next;
+                }
+
+                if (self.next) |next| {
+                    next.prev = self.prev;
+                    self.next = null;
+                }
+
+                break :collect &self.runnable;
+            };
+
+            return runnable;
+        }
+
+        /// Waits until the parenting event is set. It returns true
+        /// if this waiter was not cancelled, and false otherwise.
+        pub fn wait(self: *Waiter) bool {
+            const held = self.parent.lock.acquire();
+
+            if (self.cancelled) {
+                held.release();
+                return false;
+            }
+
+            if (self.parent.state == .set) {
+                self.parent.state = .unset;
+                held.release();
+                return true;
+            }
+
+            suspend {
+                self.frame = @frame();
+                if (self.parent.waiters) |waiter| {
+                    waiter.prev = self;
+                }
+                self.next = self.parent.waiters;
+                self.parent.waiters = self;
+                held.release();
+            }
+
+            assert(self.prev == null);
+            assert(self.next == null);
+
+            return !self.cancelled;
+        }
+    };
+
+    lock: hyperia.sync.SpinLock = .{},
+    state: State = .unset,
+    waiters: ?*Waiter = null,
+
+    pub fn set(self: *Self) ?*zap.Pool.Runnable {
+        const runnable: ?*zap.Pool.Runnable = collect: {
+            const held = self.lock.acquire();
+            defer held.release();
+
+            if (self.state == .set) {
+                break :collect null;
+            }
+
+            if (self.waiters) |waiter| {
+                self.waiters = waiter.next;
+                waiter.next = null;
+                waiter.prev = null;
+                break :collect &waiter.runnable;
+            } else {
+                self.state = .set;
+                break :collect null;
+            }
+        };
+
+        return runnable;
+    }
+
+    pub fn createWaiter(self: *Self) Waiter {
+        return Waiter{ .parent = self, .frame = undefined };
+    }
+};
+
 pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
 
         queue: Queue(T, capacity),
         closed: bool = false,
-        producer_event: AsyncAutoResetEvent = .{},
-        consumer_event: AsyncAutoResetEvent = .{},
+        producer_event: Event = .{},
+        consumer_event: Event = .{},
 
         pub fn init(allocator: *mem.Allocator) !Self {
             return Self{ .queue = try Queue(T, capacity).init(allocator) };
@@ -227,26 +344,52 @@ pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
             }
         }
 
-        pub fn push(self: *Self, item: T) bool {
-            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
-                if (self.tryPush(item)) {
-                    hyperia.pool.schedule(.{}, self.consumer_event.set());
-                    return true;
-                }
-                self.producer_event.wait();
+        pub const Pusher = struct {
+            parent: *Self,
+            waiter: Event.Waiter,
+
+            pub fn cancel(self: *Pusher) ?*zap.Pool.Runnable {
+                return self.waiter.cancel();
             }
-            return false;
+
+            pub fn push(self: *Pusher, item: T) bool {
+                while (!@atomicLoad(bool, &self.parent.closed, .Monotonic)) {
+                    if (self.parent.tryPush(item)) {
+                        hyperia.pool.schedule(.{}, self.parent.consumer_event.set());
+                        return true;
+                    }
+                    if (!self.waiter.wait()) return false;
+                }
+                return false;
+            }
+        };
+
+        pub const Popper = struct {
+            parent: *Self,
+            waiter: Event.Waiter,
+
+            pub fn cancel(self: *Popper) ?*zap.Pool.Runnable {
+                return self.waiter.cancel();
+            }
+
+            pub fn pop(self: *Popper) ?T {
+                while (!@atomicLoad(bool, &self.parent.closed, .Monotonic)) {
+                    if (self.parent.tryPop()) |item| {
+                        hyperia.pool.schedule(.{}, self.parent.producer_event.set());
+                        return item;
+                    }
+                    if (!self.waiter.wait()) return null;
+                }
+                return null;
+            }
+        };
+
+        pub fn pusher(self: *Self) Pusher {
+            return Pusher{ .parent = self, .waiter = self.producer_event.createWaiter() };
         }
 
-        pub fn pop(self: *Self) ?T {
-            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
-                if (self.tryPop()) |item| {
-                    hyperia.pool.schedule(.{}, self.producer_event.set());
-                    return item;
-                }
-                self.consumer_event.wait();
-            }
-            return null;
+        pub fn popper(self: *Self) Popper {
+            return Popper{ .parent = self, .waiter = self.consumer_event.createWaiter() };
         }
     };
 }
@@ -335,6 +478,7 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
 
 test {
     testing.refAllDecls(@This());
+    testing.refAllDecls(Event);
     testing.refAllDecls(Queue(u64, 128));
     testing.refAllDecls(AsyncQueue(u64, 128));
 }
