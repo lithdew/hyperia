@@ -242,7 +242,6 @@ pub const Client = struct {
 
     fn queryPool(self: *Client) !PoolResult {
         if (self.len == 0) {
-            self.status = .open;
             return PoolResult{ .spawned_pending = try self.spawn() };
         }
 
@@ -265,7 +264,6 @@ pub const Client = struct {
         }
 
         if (any_connected) {
-            self.status = .open;
             return PoolResult.available;
         }
 
