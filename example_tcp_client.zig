@@ -228,6 +228,8 @@ pub const Client = struct {
         self.pool[self.len] = conn;
         self.len += 1;
 
+        log.info("{*} got spawned", .{conn});
+
         return conn;
     }
 
