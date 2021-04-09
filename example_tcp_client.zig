@@ -7,6 +7,7 @@ const Reactor = hyperia.Reactor;
 const SpinLock = hyperia.sync.SpinLock;
 
 const AsyncSocket = hyperia.AsyncSocket;
+const CircuitBreaker = hyperia.CircuitBreaker;
 const AsyncWaitGroupAllocator = hyperia.AsyncWaitGroupAllocator;
 
 const os = std.os;
@@ -20,6 +21,8 @@ const log = std.log.scoped(.client);
 const assert = std.debug.assert;
 
 pub const log_level = .debug;
+
+const ConnectCircuitBreaker = CircuitBreaker(.{ .failure_threshold = 10, .reset_timeout = 1000 });
 
 var stopped: bool = false;
 var clock: time.Timer = undefined;
@@ -46,11 +49,6 @@ pub const Client = struct {
     pub const WriteQueue = mpmc.AsyncQueue([]const u8, 4096);
 
     pub const capacity = 4;
-
-    pub const Status = enum {
-        open,
-        closed,
-    };
 
     pub const Waiter = struct {
         runnable: zap.Pool.Runnable = .{ .runFn = run },
@@ -82,19 +80,27 @@ pub const Client = struct {
                 suspend self.deinit();
             }
 
-            var reconnecting = false;
             var num_attempts: usize = 0;
 
             while (true) : (num_attempts += 1) {
+                Frame.yield();
+
+                if (self.client.connect_circuit.query(@intCast(usize, time.milliTimestamp())) == .open) {
+                    assert(!self.client.reportConnectError(self, true, @errorToInt(error.NetworkUnreachable)));
+                    return;
+                }
+
                 if (num_attempts > 0) {
                     log.info("{*} reconnection attempt {}", .{ self, num_attempts });
                 }
 
                 self.connect() catch |err| {
-                    reconnecting = reconnecting and num_attempts < 10;
-                    self.client.reportConnectError(self, reconnecting, @errorToInt(err));
-                    if (reconnecting) continue else return err;
+                    if (!self.client.reportConnectError(self, false, @errorToInt(err))) {
+                        return;
+                    }
+                    continue;
                 };
+                defer self.socket.deinit();
 
                 if (!self.client.reportConnected(self)) {
                     return;
@@ -111,8 +117,9 @@ pub const Client = struct {
                 hyperia.pool.schedule(.{}, popper.cancel());
                 _ = await write_frame;
 
-                reconnecting = !self.client.reportDisconnected(self);
-                if (!reconnecting) return;
+                if (self.client.reportDisconnected(self)) {
+                    return;
+                }
             }
         }
 
@@ -167,7 +174,9 @@ pub const Client = struct {
     queue: WriteQueue,
     wga: AsyncWaitGroupAllocator,
     waiters: ?*Waiter = null,
-    status: Status = .open,
+
+    closed: bool = false,
+    connect_circuit: ConnectCircuitBreaker = ConnectCircuitBreaker.init(.half_open),
 
     pub fn init(allocator: *mem.Allocator, reactor: Reactor, address: net.Address) !Client {
         const pool = try allocator.create([capacity]*Connection);
@@ -197,7 +206,7 @@ pub const Client = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        self.status = .closed;
+        self.closed = true;
 
         for (self.pool[0..self.len]) |conn| {
             if (conn.connected) {
@@ -245,13 +254,12 @@ pub const Client = struct {
         }
 
         const pool = self.pool[0..self.len];
-        const pending = self.queue.count();
 
         const any_connected = for (pool) |conn| {
             if (conn.connected) break true;
         } else false;
 
-        if (pending == 0 or pool.len == capacity) {
+        if (self.queue.count() == 0 or pool.len == capacity) {
             return if (any_connected) PoolResult.available else PoolResult.pending;
         }
 
@@ -264,7 +272,7 @@ pub const Client = struct {
     pub fn ensureConnectionAvailable(self: *Client) !void {
         const held = self.lock.acquire();
 
-        if (self.status == .closed) {
+        if (self.closed) {
             held.release();
             return error.Closed;
         }
@@ -328,14 +336,13 @@ pub const Client = struct {
 
             assert(!conn.connected);
 
-            if (self.status == .closed) {
-                conn.socket.deinit();
+            if (self.closed) {
                 self.deregister(conn);
                 return false;
             }
 
-            self.status = .open;
             conn.connected = true;
+            self.connect_circuit.reportSuccess();
 
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
                 waiter.result = {};
@@ -352,9 +359,9 @@ pub const Client = struct {
     fn reportConnectError(
         self: *Client,
         conn: *Connection,
-        reconnecting: bool,
+        unrecoverable: bool,
         err: meta.Int(.unsigned, @sizeOf(Connection.Error) * 8),
-    ) void {
+    ) bool {
         const batch = collect: {
             var batch: zap.Pool.Batch = .{};
 
@@ -363,30 +370,22 @@ pub const Client = struct {
 
             assert(!conn.connected);
 
-            log.info("{*} got an error while connecting: {}", .{
-                conn,
-                @errSetCast(Connection.Error, @intToError(err)),
-            });
+            if (!unrecoverable) {
+                log.info("{*} got an error while connecting: {}", .{
+                    conn,
+                    @errSetCast(Connection.Error, @intToError(err)),
+                });
+            }
 
-            // If the connection is in a reconnection loop, do not report any
-            // errors and allow the connection to keep attempting to reconnect.
+            self.connect_circuit.reportFailure(@intCast(usize, time.milliTimestamp()));
 
-            if (reconnecting) return;
-
-            // Only the last pooled connection reports an error. Terminate and
-            // deregister the connection from the pool of connections that this
-            // client holds.
-
-            self.deregister(conn);
-
-            const any_connected = for (self.pool[0..self.len]) |pooled_conn| {
-                if (pooled_conn.connected) break true;
-            } else false;
-
-            // if (self.len > 1) return;
+            if (self.len > 1) {
+                self.deregister(conn);
+                return false;
+            }
 
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-                waiter.result = if (any_connected) {} else @errSetCast(Connection.Error, @intToError(err));
+                waiter.result = @errSetCast(Connection.Error, @intToError(err));
                 batch.push(&waiter.runnable);
             }
 
@@ -394,6 +393,8 @@ pub const Client = struct {
         };
 
         hyperia.pool.schedule(.{}, batch);
+
+        return !unrecoverable;
     }
 
     fn reportDisconnected(self: *Client, conn: *Connection) bool {
@@ -402,11 +403,10 @@ pub const Client = struct {
 
         assert(conn.connected);
         conn.connected = false;
-        conn.socket.deinit();
 
         log.info("{*} disconnected", .{conn});
 
-        if (self.status == .closed or self.len > 1) {
+        if (self.closed or self.len > 1) {
             self.deregister(conn);
             return true;
         }
