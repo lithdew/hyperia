@@ -67,7 +67,7 @@ pub fn CircuitBreaker(comptime opts: Options) type {
             const held = self.lock.acquire();
             defer held.release();
 
-            self.failure_count += 1;
+            self.failure_count = math.add(usize, self.failure_count, 1) catch opts.failure_threshold;
             self.last_failure_time = current_time;
         }
 
