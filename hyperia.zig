@@ -23,6 +23,7 @@ pub const Timer = @import("Timer.zig");
 pub const Reactor = @import("reactor.zig").Reactor;
 pub const Socket = @import("socket.zig").Socket;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
+pub const CircuitBreaker = @import("circuit_breaker.zig").CircuitBreaker;
 pub const AsyncWaitGroup = @import("async_wait_group.zig").AsyncWaitGroup;
 pub const AsyncWaitGroupAllocator = @import("async_wait_group_allocator.zig").AsyncWaitGroupAllocator;
 
