@@ -64,7 +64,7 @@ pub const Client = struct {
     };
 
     pub const Connection = struct {
-        pub const Error = os.ConnectError;
+        pub const Error = os.SocketError || AsyncSocket.ConnectError || os.EpollCtlError || os.SetSockOptError;
 
         client: *Client,
         socket: AsyncSocket,
@@ -86,7 +86,7 @@ pub const Client = struct {
                 Frame.yield();
 
                 if (self.client.connect_circuit.query(@intCast(usize, time.milliTimestamp())) == .open) {
-                    assert(!self.client.reportConnectError(self, true, @errorToInt(error.NetworkUnreachable)));
+                    assert(!self.client.reportConnectError(self, true, error.NetworkUnreachable));
                     return;
                 }
 
@@ -95,7 +95,7 @@ pub const Client = struct {
                 }
 
                 self.connect() catch |err| {
-                    if (!self.client.reportConnectError(self, false, @errorToInt(err))) {
+                    if (!self.client.reportConnectError(self, false, err)) {
                         return;
                     }
                     continue;
@@ -148,7 +148,7 @@ pub const Client = struct {
             }
         }
 
-        fn connect(self: *Connection) !void {
+        fn connect(self: *Connection) Error!void {
             self.socket = try AsyncSocket.init(os.AF_INET, os.SOCK_STREAM | os.SOCK_CLOEXEC, os.IPPROTO_TCP);
             errdefer self.socket.deinit();
 
@@ -360,7 +360,7 @@ pub const Client = struct {
         self: *Client,
         conn: *Connection,
         unrecoverable: bool,
-        err: meta.Int(.unsigned, @sizeOf(Connection.Error) * 8),
+        err: Connection.Error,
     ) bool {
         const batch = collect: {
             var batch: zap.Pool.Batch = .{};
@@ -371,10 +371,7 @@ pub const Client = struct {
             assert(!conn.connected);
 
             if (!unrecoverable) {
-                log.info("{*} got an error while connecting: {}", .{
-                    conn,
-                    @errSetCast(Connection.Error, @intToError(err)),
-                });
+                log.info("{*} got an error while connecting: {}", .{ conn, err });
             }
 
             self.connect_circuit.reportFailure(@intCast(usize, time.milliTimestamp()));
@@ -389,7 +386,7 @@ pub const Client = struct {
             }
 
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
-                waiter.result = @errSetCast(Connection.Error, @intToError(err));
+                waiter.result = err;
                 batch.push(&waiter.runnable);
             }
 
