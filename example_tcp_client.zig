@@ -50,7 +50,6 @@ pub const Client = struct {
     pub const Status = enum {
         open,
         closed,
-        errored,
     };
 
     pub const Waiter = struct {
@@ -248,26 +247,18 @@ pub const Client = struct {
         const pool = self.pool[0..self.len];
         const pending = self.queue.count();
 
-        if (pending == 0 and pool[0].connected) {
-            return PoolResult.available;
-        }
-
         const any_connected = for (pool) |conn| {
             if (conn.connected) break true;
         } else false;
 
-        if (pool.len < capacity and self.status != .errored) {
-            if (any_connected) {
-                return PoolResult{ .spawned_available = try self.spawn() };
-            }
-            return PoolResult{ .spawned_pending = try self.spawn() };
+        if (pending == 0 or pool.len == capacity) {
+            return if (any_connected) PoolResult.available else PoolResult.pending;
         }
 
         if (any_connected) {
-            return PoolResult.available;
+            return PoolResult{ .spawned_available = try self.spawn() };
         }
-
-        return PoolResult.pending;
+        return PoolResult{ .spawned_pending = try self.spawn() };
     }
 
     pub fn ensureConnectionAvailable(self: *Client) !void {
@@ -376,10 +367,6 @@ pub const Client = struct {
                 conn,
                 @errSetCast(Connection.Error, @intToError(err)),
             });
-
-            if (self.status != .closed) {
-                self.status = .errored;
-            }
 
             // If the connection is in a reconnection loop, do not report any
             // errors and allow the connection to keep attempting to reconnect.
