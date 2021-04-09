@@ -384,6 +384,10 @@ pub const Client = struct {
                 return false;
             }
 
+            if (unrecoverable) {
+                self.deregister(conn);
+            }
+
             while (self.waiters) |waiter| : (self.waiters = waiter.next) {
                 waiter.result = @errSetCast(Connection.Error, @intToError(err));
                 batch.push(&waiter.runnable);
