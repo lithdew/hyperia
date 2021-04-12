@@ -291,6 +291,9 @@ pub const Semaphore = struct {
         const tokens = @atomicLoad(usize, &self.tokens, .Acquire);
         if (tokens != 0) return false;
 
+        if (self.waiters) |head| {
+            head.prev = waiter;
+        }
         waiter.next = self.waiters;
         self.waiters = waiter;
 
