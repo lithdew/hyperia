@@ -38,7 +38,6 @@ pub const Header = struct {
 };
 
 pub const Request = struct {
-    bytes_read: usize,
     method: []const u8,
     path: []const u8,
     minor_version: usize,
@@ -67,7 +66,6 @@ pub const Request = struct {
             -1 => error.BadRequest,
             -2 => error.ShortRead,
             else => |bytes_read| Request{
-                .bytes_read = @intCast(usize, bytes_read),
                 .method = method,
                 .path = path,
                 .minor_version = @intCast(usize, minor_version),
@@ -109,7 +107,6 @@ test "pico_http: parse request" {
 }
 
 pub const Response = struct {
-    bytes_read: usize,
     minor_version: usize,
     status_code: usize,
     status: []const u8,
@@ -137,7 +134,6 @@ pub const Response = struct {
             -1 => error.BadResponse,
             -2 => error.ShortRead,
             else => |bytes_read| Response{
-                .bytes_read = @intCast(usize, bytes_read),
                 .minor_version = @intCast(usize, minor_version),
                 .status_code = @intCast(usize, status_code),
                 .status = status,
@@ -172,7 +168,6 @@ test "pico_http: parse response" {
 }
 
 pub const Headers = struct {
-    bytes_read: usize,
     headers: []const Header,
 
     pub fn parse(buf: []const u8, src: []Header) !Headers {
@@ -190,7 +185,6 @@ pub const Headers = struct {
             -1 => error.BadHeaders,
             -2 => error.ShortRead,
             else => |bytes_read| Headers{
-                .bytes_read = @intCast(usize, bytes_read),
                 .headers = src[0..num_headers],
             },
         };
