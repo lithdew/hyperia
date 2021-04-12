@@ -20,6 +20,8 @@ const mpmc = hyperia.mpmc;
 const log = std.log.scoped(.client);
 const assert = std.debug.assert;
 
+usingnamespace hyperia.select;
+
 pub const log_level = .debug;
 
 const ConnectCircuitBreaker = CircuitBreaker(.{ .failure_threshold = 10, .reset_timeout = 1000 });
@@ -441,13 +443,32 @@ fn runApp(reactor: Reactor) !void {
     var client = try Client.init(hyperia.allocator, reactor, address);
     defer client.deinit(hyperia.allocator);
 
-    var benchmark_frame = async runBenchmark(&client);
-    var ctrl_c_frame = async hyperia.ctrl_c.wait();
+    const Cases = struct {
+        benchmark: struct {
+            run: Case(runBenchmark),
+            cancel: Case(Client.close),
+        },
+        ctrl_c: struct {
+            run: Case(hyperia.ctrl_c.wait),
+            cancel: Case(hyperia.ctrl_c.cancel),
+        },
+    };
 
-    await ctrl_c_frame;
-    log.info("got ctrl+c", .{});
-    client.close();
-    try await benchmark_frame;
+    switch (select(
+        Cases{
+            .benchmark = .{
+                .run = call(runBenchmark, .{&client}),
+                .cancel = call(Client.close, .{&client}),
+            },
+            .ctrl_c = .{
+                .run = call(hyperia.ctrl_c.wait, .{}),
+                .cancel = call(hyperia.ctrl_c.cancel, .{}),
+            },
+        },
+    )) {
+        .benchmark => |result| return result,
+        .ctrl_c => return log.info("got ctrl+c", .{}),
+    }
 }
 
 pub fn main() !void {
