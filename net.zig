@@ -5,7 +5,18 @@ const net = std.net;
 const fmt = std.fmt;
 const testing = std.testing;
 
-pub fn parseAddress(buf: []const u8) !net.Address {
+pub const ParseAddressError = error{
+    BadPort,
+    MissingPort,
+    MissingEndBracket,
+    MissingRightBracket,
+    TooManyColons,
+    UnexpectedLeftBracket,
+    UnexpectedRightBracket,
+    InvalidIPAddressFormat,
+};
+
+pub fn parseAddress(buf: []const u8) ParseAddressError!net.Address {
     var j: usize = 0;
     var k: usize = 0;
 

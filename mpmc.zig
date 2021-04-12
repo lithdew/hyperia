@@ -187,6 +187,117 @@ pub const AsyncAutoResetEvent = struct {
     }
 };
 
+pub const Semaphore = struct {
+    const Self = @This();
+
+    pub const Waiter = struct {
+        runnable: zap.Pool.Runnable = .{ .runFn = run },
+        frame: anyframe,
+
+        parent: *Self,
+        prev: ?*Waiter = null,
+        next: ?*Waiter = null,
+        cancelled: bool = false,
+    };
+
+    tokens: usize = 0,
+
+    lock: hyperia.sync.SpinLock = .{},
+    waiters: ?*Waiter = null,
+
+    pub fn init(tokens: usize) Self {
+        return .{ .tokens = tokens };
+    }
+
+    pub fn signal(self: *Self) void {
+        var tokens = @atomicLoad(usize, &self.tokens, .Monotonic);
+        while (true) {
+            while (tokens == 0) {
+                if (self.signalSlow()) return;
+                tokens = @atomicLoad(usize, &self.tokens, .Acquire);
+            }
+
+            tokens = @cmpxchgWeak(
+                usize,
+                &self.tokens,
+                tokens,
+                tokens + 1,
+                .Release,
+                .Acquire,
+            ) orelse return;
+        }
+    }
+
+    fn signalSlow(self: *Self) bool {
+        var waiter: *Waiter = wake: {
+            const held = self.lock.acquire();
+            defer held.release();
+
+            const tokens = @atomicLoad(usize, &self.tokens, .Acquire);
+            if (tokens != 0) return false;
+
+            const waiter = self.waiters orelse {
+                assert(@cmpxchgStrong(
+                    usize,
+                    &self.tokens,
+                    tokens,
+                    tokens + 1,
+                    .Monotonic,
+                    .Monotonic,
+                ) == null);
+                return true;
+            };
+
+            if (waiter.next) |next| {
+                next.prev = null;
+            }
+            self.waiters = waiter.next;
+
+            break :wake waiter;
+        };
+
+        hyperia.pool.schedule(.{}, &waiter.runnable);
+        return true;
+    }
+
+    pub fn wait(self: *Self, waiter: *Waiter) void {
+        var tokens = @atomicLoad(usize, &self.tokens, .Acquire);
+        while (true) {
+            while (tokens == 0) {
+                suspend {
+                    waiter.frame = @frame();
+                    if (!self.waitSlow(waiter)) {
+                        hyperia.pool.schedule(.{}, &waiter.runnable);
+                    }
+                }
+                tokens = @atomicLoad(usize, &self.tokens, .Acquire);
+            }
+
+            tokens = @cmpxchgWeak(
+                usize,
+                &self.tokens,
+                tokens,
+                tokens - 1,
+                .Release,
+                .Acquire,
+            ) orelse return;
+        }
+    }
+
+    fn waitSlow(self: *Self, waiter: *Waiter) bool {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        const tokens = @atomicLoad(usize, &self.tokens, .Acquire);
+        if (tokens != 0) return false;
+
+        waiter.next = self.waiters;
+        self.waiters = waiter;
+
+        return true;
+    }
+};
+
 pub const Event = struct {
     const Self = @This();
 
@@ -479,6 +590,7 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(Event);
+    testing.refAllDecls(Semaphore);
     testing.refAllDecls(Queue(u64, 128));
     testing.refAllDecls(AsyncQueue(u64, 128));
 }
