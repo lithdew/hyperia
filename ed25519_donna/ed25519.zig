@@ -29,13 +29,17 @@ pub fn addTo(step: *std.build.LibExeObjStep, comptime dir: []const u8) void {
 
     step.addIncludeDir(dir ++ "/lib");
 
-    comptime var defines: []const []const u8 = &[_][]const u8{ "-DED25519_CUSTOMRANDOM", "-DED25519_CUSTOMHASH" };
+    var defines: std.ArrayListUnmanaged([]const u8) = .{};
+    defer defines.deinit(step.builder.allocator);
 
-    if (comptime std.Target.x86.featureSetHas(std.Target.current.cpu.features, .sse2)) {
-        defines = defines ++ [_][]const u8{"-DED25519_SSE2"};
+    defines.append(step.builder.allocator, "-DED25519_CUSTOMRANDOM") catch unreachable;
+    defines.append(step.builder.allocator, "-DED25519_CUSTOMHASH") catch unreachable;
+
+    if (std.Target.x86.featureSetHas(step.target.getCpuFeatures(), .sse2)) {
+        defines.append(step.builder.allocator, "-DED25519_SSE2") catch unreachable;
     }
 
-    step.addCSourceFile(dir ++ "/ed25519.c", defines);
+    step.addCSourceFile(dir ++ "/ed25519.c", defines.items);
 }
 
 pub fn derivePublicKey(secret_key: [32]u8) [32]u8 {

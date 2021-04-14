@@ -10,35 +10,36 @@ pub fn addTo(step: *std.build.LibExeObjStep, comptime dir: []const u8) void {
 
     step.addIncludeDir(dir ++ "/lib/c");
 
-    comptime var defines: []const []const u8 = &[_][]const u8{};
+    var defines: std.ArrayListUnmanaged([]const u8) = .{};
+    defer defines.deinit(step.builder.allocator);
 
-    if (comptime std.Target.x86.featureSetHas(std.Target.current.cpu.features, .sse2)) {
+    if (std.Target.x86.featureSetHas(step.target.getCpuFeatures(), .sse2)) {
         step.addAssemblyFile(dir ++ "/lib/c/blake3_sse2_x86-64_unix.S");
     } else {
-        defines = defines ++ [_][]const u8{"-DBLAKE3_NO_SSE2"};
+        defines.append(step.builder.allocator, "-DBLAKE3_NO_SSE2") catch unreachable;
     }
 
-    if (comptime std.Target.x86.featureSetHas(std.Target.current.cpu.features, .sse4_1)) {
+    if (std.Target.x86.featureSetHas(step.target.getCpuFeatures(), .sse4_1)) {
         step.addAssemblyFile(dir ++ "/lib/c/blake3_sse41_x86-64_unix.S");
     } else {
-        defines = defines ++ [_][]const u8{"-DBLAKE3_NO_SSE41"};
+        defines.append(step.builder.allocator, "-DBLAKE3_NO_SSE41") catch unreachable;
     }
 
-    if (comptime std.Target.x86.featureSetHas(std.Target.current.cpu.features, .avx2)) {
+    if (std.Target.x86.featureSetHas(step.target.getCpuFeatures(), .avx2)) {
         step.addAssemblyFile(dir ++ "/lib/c/blake3_avx2_x86-64_unix.S");
     } else {
-        defines = defines ++ [_][]const u8{"-DBLAKE3_NO_AVX2"};
+        defines.append(step.builder.allocator, "-DBLAKE3_NO_AVX2") catch unreachable;
     }
 
-    if (comptime std.Target.x86.featureSetHasAll(std.Target.current.cpu.features, .{ .avx512f, .avx512vl })) {
+    if (std.Target.x86.featureSetHasAll(step.target.getCpuFeatures(), .{ .avx512f, .avx512vl })) {
         step.addAssemblyFile(dir ++ "/lib/c/blake3_avx512_x86-64_unix.S");
     } else {
-        defines = defines ++ [_][]const u8{"-DBLAKE3_NO_AVX512"};
+        defines.append(step.builder.allocator, "-DBLAKE3_NO_AVX512") catch unreachable;
     }
 
-    step.addCSourceFile(dir ++ "/lib/c/blake3.c", defines);
-    step.addCSourceFile(dir ++ "/lib/c/blake3_dispatch.c", defines);
-    step.addCSourceFile(dir ++ "/lib/c/blake3_portable.c", defines);
+    step.addCSourceFile(dir ++ "/lib/c/blake3.c", defines.items);
+    step.addCSourceFile(dir ++ "/lib/c/blake3_dispatch.c", defines.items);
+    step.addCSourceFile(dir ++ "/lib/c/blake3_portable.c", defines.items);
 }
 
 pub const Hasher = struct {
