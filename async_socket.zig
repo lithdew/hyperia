@@ -192,7 +192,7 @@ pub const AsyncSocket = struct {
     }
 
     pub fn Sender(comptime flags: i32) type {
-        return io.Writer(*Self, SendError, struct{
+        return io.Writer(*Self, SendError, struct {
             pub fn call(self: *Self, buf: []const u8) SendError!usize {
                 return self.send(buf, flags);
             }
@@ -201,8 +201,8 @@ pub const AsyncSocket = struct {
 
     pub fn sender(self: *Self, comptime flags: i32) Sender(flags) {
         return Sender(flags){ .context = self };
-    } 
- 
+    }
+
     pub const ConnectError = os.ConnectError || Error;
 
     pub fn connect(self: *Self, address: net.Address) ConnectError!void {

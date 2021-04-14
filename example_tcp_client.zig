@@ -87,7 +87,8 @@ pub const Client = struct {
             while (true) : (num_attempts += 1) {
                 Frame.yield();
 
-                if (self.client.connect_circuit.query(@intCast(usize, time.milliTimestamp())) == .open) {
+                const connect_circuit_breaker_status = self.client.connect_circuit.query(@intCast(usize, time.milliTimestamp()));
+                if (connect_circuit_breaker_status == .open) {
                     assert(!self.client.reportConnectError(self, true, error.NetworkUnreachable));
                     return;
                 }
@@ -265,10 +266,15 @@ pub const Client = struct {
             return if (any_connected) PoolResult.available else PoolResult.pending;
         }
 
-        if (any_connected) {
-            return PoolResult{ .spawned_available = try self.spawn() };
+        const connect_circuit_breaker_status = self.connect_circuit.query(@intCast(usize, time.milliTimestamp()));
+        if (connect_circuit_breaker_status == .open) {
+            return if (any_connected) PoolResult.available else PoolResult.pending;
         }
-        return PoolResult{ .spawned_pending = try self.spawn() };
+
+        if (!any_connected) {
+            return PoolResult{ .spawned_pending = try self.spawn() };
+        }
+        return PoolResult{ .spawned_available = try self.spawn() };
     }
 
     pub fn ensureConnectionAvailable(self: *Client) !void {
