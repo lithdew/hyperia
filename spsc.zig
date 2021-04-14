@@ -13,36 +13,52 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     else => 64,
 };
 
-pub fn Queue(comptime T: type) type {
+pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
         const Self = @This();
 
-        pub const Node = struct {
-            next: ?*Node = null,
-            value: T,
-        };
+        entries: [capacity]T align(cache_line_length) = undefined,
+        enqueue_pos: usize align(cache_line_length) = 0,
+        dequeue_pos: usize align(cache_line_length) = 0,
 
-        stub: Node = .{ .value = undefined },
-        tail: ?*Node align(128) = null,
-        head: ?*Node align(128) = null,
-
-        pub fn push(self: *Self, node: *Node) void {
-            @atomicStore(?*Node, &(self.head orelse &self.stub).next, node, .Release);
-            self.head = node;
+        pub fn push(self: *Self, item: T) bool {
+            const head = self.enqueue_pos;
+            const tail = @atomicLoad(usize, &self.dequeue_pos, .Acquire);
+            if (head +% 1 -% tail > capacity) {
+                return false;
+            }
+            self.entries[head & (capacity - 1)] = item;
+            @atomicStore(usize, &self.enqueue_pos, head +% 1, .Release);
+            return true;
         }
 
-        pub fn pop(self: *Self) ?*Node {
-            const result = @atomicLoad(?*Node, &(self.tail orelse &self.stub).next, .Acquire) orelse return null;
-            @atomicStore(?*Node, &self.tail, result, .Release);
-            return result;
+        pub fn pop(self: *Self) ?T {
+            const tail = self.dequeue_pos;
+            const head = @atomicLoad(usize, &self.enqueue_pos, .Acquire);
+            if (tail -% head == 0) {
+                return null;
+            }
+            const popped = self.entries[tail & (capacity - 1)];
+            @atomicStore(usize, &self.dequeue_pos, tail +% 1, .Release);
+            return popped;
         }
     };
 }
 
 test "queue" {
-    var queue: Queue(u64) = .{};
-    var node: Queue(u64).Node = .{ .value = 42 };
+    var queue: Queue(u64, 4) = .{};
 
-    queue.push(&node);
-    testing.expect(queue.pop().? == &node);
+    var i: usize = 0;
+    while (i < 4) : (i += 1) testing.expect(queue.push(i));
+    testing.expect(!queue.push(5));
+    testing.expect(!queue.push(6));
+    testing.expect(!queue.push(7));
+    testing.expect(!queue.push(8));
+
+    var j: usize = 0;
+    while (j < 4) : (j += 1) testing.expect(queue.pop().? == j);
+    testing.expect(queue.pop() == null);
+    testing.expect(queue.pop() == null);
+    testing.expect(queue.pop() == null);
+    testing.expect(queue.pop() == null);
 }

@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 
 pub const net = @import("net.zig");
 pub const sync = @import("sync.zig");
+pub const spsc = @import("spsc.zig");
 pub const mpsc = @import("mpsc.zig");
 pub const mpmc = @import("mpmc.zig");
 pub const oneshot = @import("oneshot.zig");
