@@ -1,6 +1,9 @@
 const std = @import("std");
+const zap = @import("zap");
+const hyperia = @import("hyperia.zig");
 
 const mem = std.mem;
+const mpsc = hyperia.mpsc;
 const builtin = std.builtin;
 const testing = std.testing;
 
@@ -12,6 +15,55 @@ pub const cache_line_length = switch (builtin.cpu.arch) {
     .s390x => 256,
     else => 64,
 };
+
+pub fn AsyncQueue(comptime T: type, comptime capacity: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        queue: Queue(T, capacity) = .{},
+        closed: bool = false,
+        producer_event: mpsc.AsyncAutoResetEvent(void) = .{},
+        consumer_event: mpsc.AsyncAutoResetEvent(void) = .{},
+
+        pub fn close(self: *Self) void {
+            @atomicStore(bool, &self.closed, true, .Monotonic);
+
+            while (true) {
+                var batch: zap.Pool.Batch = .{};
+                batch.push(self.producer_event.set());
+                batch.push(self.consumer_event.set());
+                if (batch.isEmpty()) break;
+                hyperia.pool.schedule(.{}, batch);
+            }
+        }
+
+        pub fn push(self: *Self, item: T) bool {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
+                if (self.queue.push(item)) {
+                    if (self.consumer_event.set()) |runnable| {
+                        hyperia.pool.schedule(.{}, runnable);
+                    }
+                    return true;
+                }
+                self.producer_event.wait();
+            }
+            return false;
+        }
+
+        pub fn pop(self: *Self) ?T {
+            while (!@atomicLoad(bool, &self.closed, .Monotonic)) {
+                if (self.queue.pop()) |item| {
+                    if (self.producer_event.set()) |runnable| {
+                        hyperia.pool.schedule(.{}, runnable);
+                    }
+                    return item;
+                }
+                self.consumer_event.wait();
+            }
+            return null;
+        }
+    };
+}
 
 pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
     return struct {
@@ -43,6 +95,11 @@ pub fn Queue(comptime T: type, comptime capacity: comptime_int) type {
             return popped;
         }
     };
+}
+
+test {
+    testing.refAllDecls(Queue(u64, 4));
+    testing.refAllDecls(AsyncQueue(u64, 4));
 }
 
 test "queue" {
