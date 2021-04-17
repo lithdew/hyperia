@@ -135,7 +135,7 @@ test "timer2: register timer" {
         try reactor.poll(1, struct {
             pub fn call(event: Reactor.Event) void {
                 var batch: zap.Pool.Batch = .{};
-                defer hyperia.pool.schedule(.{}, batch);
+                defer while (batch.pop()) |runnable| runnable.run();
 
                 const event_handle = @intToPtr(*Reactor.Handle, event.data);
                 event_handle.call(&batch, event);
