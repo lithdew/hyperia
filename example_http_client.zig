@@ -535,7 +535,7 @@ pub fn main() !void {
                 const handle = @intToPtr(*Reactor.Handle, event.data);
                 handle.call(self.batch, event);
             }
-        }{ .batch = &batch }, timer.delay(clock.read()));
+        }{ .batch = &batch }, if (timer.delay(clock.read())) |delay| @intCast(u64, delay) else null);
 
         timer.update(clock.read(), struct {
             batch: *zap.Pool.Batch,
