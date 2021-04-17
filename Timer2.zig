@@ -70,6 +70,14 @@ pub fn init(allocator: *mem.Allocator, event: *Reactor.AutoResetEvent) Timer {
 }
 
 pub fn deinit(self: *Timer, allocator: *mem.Allocator) void {
+    var batch: zap.Pool.Batch = .{};
+    defer hyperia.pool.schedule(.{}, batch);
+
+    while (self.pending.removeOrNull()) |handle| {
+        handle.result = error.Cancelled;
+        batch.push(&handle.runnable);
+    }
+
     self.pending.deinit();
 }
 
@@ -127,7 +135,7 @@ test "timer2: register timer" {
         try reactor.poll(1, struct {
             pub fn call(event: Reactor.Event) void {
                 var batch: zap.Pool.Batch = .{};
-                defer while (batch.pop()) |runnable| runnable.run();
+                defer hyperia.pool.schedule(.{}, batch);
 
                 const event_handle = @intToPtr(*Reactor.Handle, event.data);
                 event_handle.call(&batch, event);
@@ -141,6 +149,5 @@ test "timer2: register timer" {
         });
     }
 
-    std.debug.print("xxx\n", .{});
     try nosuspend await handle_frame;
 }
