@@ -90,7 +90,7 @@ pub const Reactor = struct {
         });
     }
 
-    pub fn poll(self: Reactor, comptime max_num_events: comptime_int, closure: anytype, timeout_milliseconds: ?usize) !void {
+    pub fn poll(self: Reactor, comptime max_num_events: comptime_int, closure: anytype, timeout_milliseconds: ?u64) !void {
         var events: [max_num_events]os.epoll_event = undefined;
 
         const num_events = os.epoll_wait(self.fd, &events, if (timeout_milliseconds) |ms| @intCast(i32, ms) else -1);
