@@ -18,7 +18,7 @@ pub const Handle = struct {
     pub const Error = error{Cancelled} || mem.Allocator.Error;
 
     parent: *Timer,
-    expires_at: usize,
+    expires_at: u64,
     result: ?Error = null,
 
     runnable: zap.Pool.Runnable = .{ .runFn = resumeWaiter },
@@ -81,21 +81,21 @@ pub fn deinit(self: *Timer, allocator: *mem.Allocator) void {
     self.pending.deinit();
 }
 
-pub fn after(self: *Timer, duration_ms: usize) Handle {
-    return Handle{ .parent = self, .expires_at = @intCast(usize, time.milliTimestamp()) + duration_ms };
+pub fn after(self: *Timer, duration_ms: u64) Handle {
+    return Handle{ .parent = self, .expires_at = @intCast(u64, time.milliTimestamp()) + duration_ms };
 }
 
-pub fn at(self: *Timer, timestamp_ms: usize) Handle {
+pub fn at(self: *Timer, timestamp_ms: u64) Handle {
     return Handle{ .parent = self, .expires_at = timestamp_ms };
 }
 
-pub fn delay(self: *Timer) ?usize {
+pub fn delay(self: *Timer) ?u64 {
     const head = self.pending.peek() orelse return null;
-    return math.sub(usize, head.expires_at, @intCast(usize, time.milliTimestamp())) catch 0;
+    return math.sub(u64, head.expires_at, @intCast(u64, time.milliTimestamp())) catch 0;
 }
 
 pub fn update(self: *Timer, closure: anytype) void {
-    const current_time = @intCast(usize, time.milliTimestamp());
+    const current_time = @intCast(u64, time.milliTimestamp());
 
     while (true) {
         const head = self.pending.peek() orelse break;
