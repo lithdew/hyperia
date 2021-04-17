@@ -21,6 +21,7 @@ pub const select = @import("select.zig");
 pub const ObjectPool = @import("object_pool.zig").ObjectPool;
 
 pub const Timer = @import("Timer.zig");
+pub const Timer2 = @import("Timer2.zig");
 pub const Reactor = @import("reactor.zig").Reactor;
 pub const Socket = @import("socket.zig").Socket;
 pub const AsyncSocket = @import("async_socket.zig").AsyncSocket;
