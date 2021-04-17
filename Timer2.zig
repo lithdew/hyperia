@@ -38,6 +38,11 @@ pub const Handle = struct {
     }
 
     pub fn wait(self: *Timer.Handle) callconv(.Async) !void {
+        if (self.result) |err| {
+            self.result = null;
+            return err;
+        }
+
         suspend {
             self.frame = @frame();
 
@@ -49,9 +54,10 @@ pub const Handle = struct {
             }
         }
 
-        const err = self.result orelse return;
-        self.result = null;
-        return err;
+        if (self.result) |err| {
+            self.result = null;
+            return err;
+        }
     }
 };
 
