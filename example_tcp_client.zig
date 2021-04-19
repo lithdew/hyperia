@@ -139,14 +139,11 @@ pub const Client = struct {
         fn writeLoop(self: *Connection, popper: *WriteQueue.Popper) !void {
             defer log.info("{*} write loop ended", .{self});
 
+            const sender = self.socket.sender(os.MSG_NOSIGNAL);
+
             while (true) {
                 const buf = popper.pop() orelse return;
-
-                var i: usize = 0;
-                while (i < buf.len) {
-                    i += try self.socket.send(buf[i..], os.MSG_NOSIGNAL);
-                }
-
+                try sender.writeAll(buf);
                 Frame.yield();
             }
         }
